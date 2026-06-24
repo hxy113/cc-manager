@@ -5,7 +5,7 @@
     支持 <b>Claude Code</b> · <b>Codex CLI</b>
   </p>
   <p align="center">
-    <a href="LICENSE"><img src="https://img.shields.io/github/license/hxy113/cc-manager" alt="License"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
     <a href="https://github.com/hxy113/cc-manager/releases"><img src="https://img.shields.io/github/v/release/hxy113/cc-manager" alt="Version"></a>
     <a href="https://github.com/hxy113/cc-manager/commits/main"><img src="https://img.shields.io/github/last-commit/hxy113/cc-manager" alt="Last Commit"></a>
     <img src="https://img.shields.io/github/repo-size/hxy113/cc-manager" alt="Repo Size">
