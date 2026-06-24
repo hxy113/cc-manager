@@ -263,11 +263,15 @@ router.get('/api/backup/history', (req, res) => {
 });
 
 // 从某 commit 恢复
-router.post('/api/backup/restore', (req, res) => {
-  const { hash, cli } = req.body || {};
+router.post('/api/backup/restore', async (req, res) => {
+  const { hash, cli, mode } = req.body || {};
   if (!hash) return res.status(400).json({ error: '需要 hash 参数' });
-  const result = backup.restoreFromCommit(hash, cli);
-  res.json(result);
+  try {
+    const result = await backup.restoreFromCommit(hash, cli, mode || 'incremental');
+    res.json(result);
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 module.exports = router;

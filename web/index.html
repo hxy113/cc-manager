@@ -242,9 +242,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <!-- 恢复模态框 -->
 <div id="restore-modal" class="modal-overlay" style="display:none">
   <div class="modal">
-    <h3>↩️ 恢复备份</h3>
+    <h3>恢复备份</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+      恢复模式：
+      <select id="restore-mode">
+        <option value="incremental">增量恢复（默认，仅补充缺失的会话）</option>
+        <option value="merge">合并覆盖（备份有则覆盖，备份无则保留）</option>
+        <option value="full">完全覆盖（用备份完全替换当前）</option>
+      </select>
+    </p>
     <div id="restore-list" style="margin: 12px 0">
       <p style="color:var(--text-muted)">加载中…</p>
+    </div>
+    <div id="restore-info" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;display:none">
+      恢复前会自动备份当前状态到本地目录
     </div>
     <div class="modal-actions">
       <button class="btn" id="restore-close">关闭</button>
@@ -385,6 +396,7 @@ $('#btn-webdav-test').onclick = async () => {
 
 $('#btn-restore').onclick = async () => {
   $('#restore-modal').style.display = 'flex';
+  $('#restore-info').style.display = '';
   const list = $('#restore-list');
   list.innerHTML = '<p style="color:var(--text-muted)">加载中…</p>';
   try {
@@ -393,12 +405,13 @@ $('#btn-restore').onclick = async () => {
       list.innerHTML = '<p>暂无备份历史</p>';
       return;
     }
+    const mode = () => $('#restore-mode').value;
     list.innerHTML = history.map((h, i) => {
       const d = new Date(h.timestamp).toLocaleString();
       return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:13px">
         <span style="flex:1">${d} — ${h.message}</span>
         <code style="font-size:11px;color:var(--text-muted)">${h.hash.slice(0,8)}</code>
-        <button class="btn btn-sm btn-primary" onclick="restoreFromCommit('${h.hash}')">恢复</button>
+        <button class="btn btn-sm btn-primary" onclick="restoreFromCommit('${h.hash}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
       </div>`;
     }).join('');
   } catch (e) {
@@ -409,12 +422,21 @@ $('#btn-restore').onclick = async () => {
 $('#restore-close').onclick = () => $('#restore-modal').style.display = 'none';
 
 window.restoreFromCommit = async (hash) => {
-  if (!confirm(`确定从 ${hash.slice(0,8)} 恢复备份？现有会话会被覆盖。`)) return;
+  const mode = $('#restore-mode').value;
+  if (mode === 'full') {
+    if (!confirm(`完全覆盖模式将用备份完全替换当前会话文件。\n\n确定从 ${hash.slice(0,8)} 完全覆盖？`)) return;
+  } else if (mode === 'merge') {
+    if (!confirm(`合并模式：备份中的会话会覆盖当前版本，备份中无的内容保留。\n\n确定从 ${hash.slice(0,8)} 合并恢复？`)) return;
+  } else {
+    if (!confirm(`增量模式：仅补充当前缺失的会话，已有的不变。\n\n确定从 ${hash.slice(0,8)} 增量恢复？`)) return;
+  }
   try {
-    const r = await api('/api/backup/restore', { method: 'POST', body: JSON.stringify({ hash }) });
+    const r = await api('/api/backup/restore', {
+      method: 'POST',
+      body: JSON.stringify({ hash, mode })
+    });
     if (r.ok) {
-      showToast(r.message, 'success');
-      // 刷新当前视图
+      showToast(r.message + (r.safetyBackup ? ' | 原状态已备份到: ' + r.safetyBackup : ''), 'success');
       loadSessions();
     } else {
       showToast(r.error, 'error');

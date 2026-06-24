@@ -1,12 +1,25 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const store = require('./store');
 
 // ========== 构建备份工作区的快照 ==========
 
+function ensureBackupGit() {
+  // 确保备份工作区是一个 git 仓库
+  if (!fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
+    store.ensureDir(store.BACKUP_WORKSPACE);
+    runGit(['init', '-b', 'main'], store.BACKUP_WORKSPACE);
+    runGit(['config', 'user.name', 'cc-manager'], store.BACKUP_WORKSPACE);
+    runGit(['config', 'user.email', 'cc-manager@local'], store.BACKUP_WORKSPACE);
+    // 初次空提交，让 git log 可以工作
+    runGit(['commit', '--allow-empty', '-m', 'backup workspace initialized'], store.BACKUP_WORKSPACE);
+  }
+}
+
 function buildBackupSnapshot() {
+  ensureBackupGit();
   store.ensureDir(store.BACKUP_WORKSPACE);
 
   // 清理旧快照（保留 .git）
@@ -45,8 +58,7 @@ function buildBackupSnapshot() {
 // ========== Git 操作 ==========
 
 function runGit(args, cwd) {
-  const cmd = `git ${args.join(' ')}`;
-  return execSync(cmd, { cwd, encoding: 'utf-8', timeout: 30000 });
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', timeout: 30000 });
 }
 
 function gitAvailable() {
@@ -315,6 +327,17 @@ async function asyncRunBackup() {
     results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
   }
 
+  // 无论哪种备份方式，都对 workspace git 做一次提交以便恢复历史可查
+  try {
+    runGit(['add', '-A'], wd);
+    const raw = runGit(['status', '--porcelain'], wd);
+    if (raw.trim()) {
+      runGit(['commit', '-m', `backup ${timestamp}`], wd);
+    }
+  } catch (e) {
+    // workspace git 提交失败不影响备份本身
+  }
+
   store.updateConfig({ lastBackupAt: Date.now() });
   const allOk = results.every(r => r.ok);
   const messages = results.map(r => r.target + ': ' + (r.message || r.error || '?'));
@@ -327,57 +350,112 @@ function listBackupHistory(limit = 20) {
     return [];
   }
   try {
-    const log = runGit(['log', `--format=%H|%ct|%s`, `-${limit}`], store.BACKUP_WORKSPACE);
+    // Windows CMD 会把 | 解释为管道，所以用逗号分隔再替换
+    const log = runGit(['log', `--format=%H__%ct__%s`, `-${limit}`], store.BACKUP_WORKSPACE);
     return log.trim().split('\n').filter(Boolean).map(line => {
-      const [hash, ts, ...msgParts] = line.split('|');
-      return { hash, timestamp: parseInt(ts) * 1000, message: msgParts.join('|') };
+      const [hash, ts, ...msgParts] = line.split('__');
+      return { hash, timestamp: parseInt(ts) * 1000, message: msgParts.join('__') };
     });
   } catch (e) { return []; }
 }
 
-// 从某个 commit 恢复
-function restoreFromCommit(hash, cli) {
+// 从某个 commit 恢复（mode: incremental / merge / full）
+async function restoreFromCommit(hash, cli, mode) {
   if (!fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
     return { ok: false, error: '备份仓库不存在' };
   }
-  try {
-    // 检出到临时目录
-    const tmpRestore = path.join(store.CC_MANAGER_DIR, 'restore-tmp');
-    if (fs.existsSync(tmpRestore)) fs.rmSync(tmpRestore, { recursive: true, force: true });
-    fs.mkdirSync(tmpRestore, { recursive: true });
+  mode = mode || 'incremental';  // 默认增量
 
-    // 使用 git archive 或 checkout 提取文件
-    runGit([`-C`, store.BACKUP_WORKSPACE, `archive`, hash, `--format=tar`], tmpRestore);
-    // Windows 没有 tar，改用 checkout-index 方法
+  try {
+    // 1. 恢复前安全备份当前状态
+    const safeTs = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
+    const backupDir = path.join(os.homedir(), 'cc-manager-local-backups', `pre-restore-${safeTs}`);
+    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
+    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
+    fs.mkdirSync(backupDir, { recursive: true });
+    if (fs.existsSync(claudeSrc)) {
+      execSync(`xcopy "${claudeSrc}" "${path.join(backupDir, 'claude-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
+    }
+    if (fs.existsSync(codexSrc)) {
+      execSync(`xcopy "${codexSrc}" "${path.join(backupDir, 'codex-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
+    }
+
+    // 2. 把要恢复的 commit 检出到 workspace
     const oldCwd = process.cwd();
     process.chdir(store.BACKUP_WORKSPACE);
     try {
       execSync(`git checkout ${hash} -- .`, { timeout: 10000, cwd: store.BACKUP_WORKSPACE });
-      // 现在工作区处于指定 commit 状态，复制回原始位置
-      if (!cli || cli === 'claude') {
-        const src = path.join(store.BACKUP_WORKSPACE, 'claude-sessions');
-        const dest = path.join(os.homedir(), '.claude', 'projects');
-        if (fs.existsSync(src)) {
-          execSync(`xcopy "${src}" "${dest}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-        }
-      }
-      if (!cli || cli === 'codex') {
-        const src = path.join(store.BACKUP_WORKSPACE, 'codex-sessions');
-        const dest = path.join(os.homedir(), '.codex', 'sessions');
-        if (fs.existsSync(src)) {
-          execSync(`xcopy "${src}" "${dest}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-        }
-      }
-      // 恢复当前工作区
-      runGit(['checkout', '--', '.'], store.BACKUP_WORKSPACE);
     } finally {
       process.chdir(oldCwd);
     }
 
+    // 3. 根据模式复制
+    const claudeSrcBackup = path.join(store.BACKUP_WORKSPACE, 'claude-sessions');
+    const codexSrcBackup = path.join(store.BACKUP_WORKSPACE, 'codex-sessions');
+
+    if (!cli || cli === 'claude') {
+      copyWithMode(claudeSrcBackup, claudeSrc, mode);
+    }
+    if (!cli || cli === 'codex') {
+      copyWithMode(codexSrcBackup, codexSrc, mode);
+    }
+
+    // 4. 恢复 workspace 回当前状态
+    try {
+      runGit(['checkout', '--', '.'], store.BACKUP_WORKSPACE);
+    } catch (e) { /* 忽略 */ }
+
     store.updateConfig({ lastRestoreAt: Date.now() });
-    return { ok: true, message: `已从 commit ${hash.slice(0, 8)} 恢复` };
+    return {
+      ok: true,
+      message: `已从 ${hash.slice(0, 8)} ${mode}恢复，恢复前已备份到 ${backupDir}`,
+      safetyBackup: backupDir
+    };
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+}
+
+// 按模式复制文件
+function copyWithMode(srcDir, destDir, mode) {
+  if (!fs.existsSync(srcDir)) return;
+
+  const files = [];
+  function walk(dir, relative) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, path.join(relative, entry.name));
+      } else {
+        files.push({ src: full, rel: path.join(relative, entry.name) });
+      }
+    }
+  }
+  walk(srcDir, '');
+
+  for (const f of files) {
+    const destFile = path.join(destDir, f.rel);
+    switch (mode) {
+      case 'incremental':
+        // 仅当目标不存在时复制
+        if (!fs.existsSync(destFile)) {
+          fs.mkdirSync(path.dirname(destFile), { recursive: true });
+          fs.copyFileSync(f.src, destFile);
+        }
+        break;
+      case 'merge':
+        // 存在就覆盖，不存在就添加；目标有但备份无的不动
+        fs.mkdirSync(path.dirname(destFile), { recursive: true });
+        fs.copyFileSync(f.src, destFile);
+        break;
+      case 'full':
+        // 完全覆盖（xcopy /Y 行为）
+        fs.mkdirSync(path.dirname(destFile), { recursive: true });
+        fs.copyFileSync(f.src, destFile);
+        break;
+    }
   }
 }
 
