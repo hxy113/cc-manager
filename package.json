@@ -1,0 +1,25 @@
+{
+  "name": "cc-manager",
+  "version": "0.1.0",
+  "description": "Claude Code / Codex CLI 本地会话管理与备份工具",
+  "bin": {
+    "cc-manager": "server/index.js"
+  },
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js ui",
+    "ui": "node server/index.js ui",
+    "backup": "node server/index.js backup",
+    "restore": "node server/index.js restore"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hxy113/cc-manager.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5",
+    "chokidar": "^4.0.0"
+  }
+}

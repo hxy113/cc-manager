@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cc-manager</title>
+<style>
+/* ========== 全局 ========== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f5f5f5; --panel: #fff; --border: #e0e0e0;
+  --text: #1a1a1a; --text-muted: #888;
+  --accent: #2563eb; --accent-hover: #1d4ed8;
+  --user-color: #e8f4fd; --assistant-color: #f0fdf4;
+  --tool-color: #f5f5f5; --tool-border: #ddd;
+  --favorite: #f59e0b; --danger: #dc2626;
+  --sidebar-width: 260px; --mid-width: 360px;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+
+/* ========== 布局 ========== */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* 顶栏 */
+#topbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#topbar h1 { font-size: 16px; font-weight: 600; margin-right: 8px; }
+#topbar .info { color: var(--text-muted); font-size: 12px; flex: 1; }
+.btn { padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 13px; transition: all .15s; }
+.btn:hover { background: var(--bg); }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-sm { padding: 3px 8px; font-size: 12px; }
+.btn-danger { color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: #fee2e2; }
+.btn-icon { background: none; border: none; cursor: pointer; padding: 2px 6px; font-size: 14px; border-radius: 4px; }
+.btn-icon:hover { background: var(--bg); }
+
+/* 三栏 */
+#panels { display: flex; flex: 1; overflow: hidden; }
+
+/* --- 左栏 --- */
+#sidebar { width: var(--sidebar-width); min-width: var(--sidebar-width); background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.cli-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.cli-tab { flex: 1; padding: 10px 4px; text-align: center; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; transition: all .15s; color: var(--text-muted); }
+.cli-tab:hover { background: var(--bg); }
+.cli-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+#project-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.project-item { padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent; font-size: 13px; transition: all .1s; }
+.project-item:hover { background: var(--bg); }
+.project-item.active { background: #eff6ff; border-left-color: var(--accent); }
+.project-item .path { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.project-item .count { float: right; color: var(--text-muted); font-size: 12px; }
+
+/* --- 中栏 --- */
+#mid { width: var(--mid-width); min-width: var(--mid-width); background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+#mid-toolbar { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+#mid-toolbar label { font-size: 12px; color: var(--text-muted); }
+#mid-toolbar select { padding: 3px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; }
+#mid-toolbar input { padding: 4px 8px; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; flex: 1; min-width: 80px; }
+#mid-toolbar .session-count { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+#session-list { flex: 1; overflow-y: auto; }
+.session-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; transition: all .1s; }
+.session-item:hover { background: var(--bg); }
+.session-item.active { background: #eff6ff; }
+.session-item .title-row { display: flex; align-items: center; gap: 6px; }
+.session-item .title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.session-item .favorite-star { color: var(--favorite); font-size: 14px; }
+.session-item .alias-tag { font-size: 11px; color: var(--accent); background: #eff6ff; padding: 1px 5px; border-radius: 3px; }
+.session-item .subtitle { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: 'Consolas', monospace; }
+.session-item .meta-line { font-size: 11px; color: var(--text-muted); margin-top: 2px; display: flex; gap: 8px; }
+.session-item .actions { display: flex; gap: 2px; margin-top: 4px; opacity: 0; transition: opacity .15s; }
+.session-item:hover .actions { opacity: 1; }
+
+/* --- 右栏 --- */
+#preview { flex: 1; background: var(--panel); display: flex; flex-direction: column; overflow: hidden; }
+#preview-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+#preview-header h2 { font-size: 14px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#preview-content { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.msg { margin-bottom: 12px; border-radius: 8px; padding: 10px 14px; max-width: 90%; }
+.msg.user { background: var(--user-color); margin-left: auto; }
+.msg.user.tool-result-wrap { background: #f0f0f0; margin-left: auto; }
+.msg.assistant { background: var(--assistant-color); margin-right: auto; }
+.msg.tool { background: var(--tool-color); border: 1px solid var(--tool-border); font-size: 12px; margin-right: auto; }
+.msg .label { font-weight: 600; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; color: var(--text-muted); }
+.msg .content { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.5; }
+.msg .content code { background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.msg.tool .content { max-height: 300px; overflow-y: auto; }
+.empty-state { display: flex; flex: 1; align-items: center; justify-content: center; color: var(--text-muted); font-size: 14px; flex-direction: column; gap: 8px; }
+
+/* 会话导航 */
+#preview-nav-btn { font-size: 14px; margin-right: 4px; transition: background .15s; }
+#preview-nav-btn.active { background: #dbeafe; }
+#preview-content { flex: 1; overflow-y: auto; }
+#preview-nav { width: 0; overflow: hidden; transition: width .2s; background: var(--bg); border-left: 1px solid var(--border); flex-shrink: 0; }
+#preview-nav.open { width: 220px; min-width: 220px; }
+#preview-nav-inner { width: 220px; height: 100%; display: flex; flex-direction: column; }
+#preview-nav-inner h3 { font-size: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 600; flex-shrink: 0; }
+#preview-nav-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.nav-item { padding: 6px 12px; cursor: pointer; font-size: 12px; color: var(--text-muted); border-left: 3px solid transparent; transition: all .1s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-item:hover { background: #e8e8e8; }
+.nav-item.active { background: #dbeafe; border-left-color: var(--accent); color: var(--text); font-weight: 500; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal { background: var(--panel); border-radius: 12px; padding: 24px; min-width: 400px; max-width: 600px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,.15); }
+.modal h3 { margin-bottom: 16px; }
+.modal label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-muted); }
+.modal input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; margin-bottom: 12px; }
+.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal .modal-message { margin-top: 12px; padding: 8px; border-radius: 6px; font-size: 13px; }
+.modal .modal-message.success { background: #f0fdf4; color: #16a34a; }
+.modal .modal-message.error { background: #fee2e2; color: #dc2626; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #aaa; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 顶栏 -->
+  <div id="topbar">
+    <h1>📋 cc-manager</h1>
+    <span class="info" id="status-text">就绪</span>
+    <button class="btn btn-primary btn-sm" id="btn-backup">☁️ 一键备份</button>
+    <button class="btn btn-sm" id="btn-restore">↩️ 恢复</button>
+    <button class="btn btn-sm" id="btn-settings">⚙️ 设置</button>
+  </div>
+
+  <!-- 三栏 -->
+  <div id="panels">
+    <!-- 左栏: CLI + 项目 -->
+    <div id="sidebar">
+      <div class="cli-tabs" id="cli-tabs"></div>
+      <div id="project-list"></div>
+    </div>
+
+    <!-- 中栏: 会话列表 -->
+    <div id="mid">
+      <div id="mid-toolbar">
+        <label>排序</label>
+        <select id="sort-select">
+          <option value="time-desc">时间↓ 最新</option>
+          <option value="time-asc">时间↑ 最早</option>
+          <option value="title">会话名</option>
+          <option value="count">消息数</option>
+        </select>
+        <input type="text" id="search-input" placeholder="搜索…" />
+        <select id="search-scope" style="font-size:12px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;flex-shrink:0">
+          <option value="content">标题+内容</option>
+          <option value="title">仅标题</option>
+          <option value="regex">正则</option>
+        </select>
+        <span class="session-count" id="session-count">0</span>
+      </div>
+      <div id="session-list"></div>
+    </div>
+
+    <!-- 右栏: 预览 -->
+    <div id="preview">
+      <div id="preview-header">
+        <button class="btn-icon" id="preview-nav-btn" title="用户输入导航" style="display:none">📋</button>
+        <h2 id="preview-title">选择会话以预览</h2>
+        <button class="btn btn-sm" id="btn-export" style="display:none">📥 导出 Markdown</button>
+        <button class="btn btn-sm btn-danger" id="btn-delete" style="display:none">🗑 删除</button>
+      </div>
+      <div style="display:flex;flex:1;overflow:hidden">
+        <div id="preview-content">
+          <div class="empty-state">
+            <span>← 左侧选择一个会话开始浏览</span>
+            <span style="font-size:12px">支持 Claude Code / Codex</span>
+          </div>
+        </div>
+        <div id="preview-nav">
+          <div id="preview-nav-inner">
+            <h3>用户输入</h3>
+            <div id="preview-nav-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 别名模态框 -->
+<div id="alias-modal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>✏️ 设置别名</h3>
+    <label>别名</label>
+    <input type="text" id="alias-input" placeholder="输入易记名称" maxlength="64" />
+    <div class="modal-actions">
+      <button class="btn" id="alias-cancel">取消</button>
+      <button class="btn btn-primary" id="alias-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置模态框 -->
+<div id="settings-modal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>⚙️ 设置</h3>
+
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">备份目标：<select id="setting-target">
+      <option value="local">本地文件</option>
+      <option value="github">GitHub</option>
+      <option value="webdav">WebDAV</option>
+      <option value="all">本地 + GitHub + WebDAV</option>
+    </select></p>
+
+    <div id="setting-local-section">
+      <label>本地备份目录（默认 ~/cc-manager-local-backups/）</label>
+      <input type="text" id="setting-local-dir" placeholder="留空则使用默认路径" />
+    </div>
+
+    <div id="setting-github-section" style="display:none">
+      <label>GitHub 仓库 URL</label>
+      <input type="text" id="setting-repo" placeholder="https://github.com/用户名/仓库名.git" />
+      <label>分支</label>
+      <input type="text" id="setting-branch" value="main" />
+    </div>
+
+    <div id="setting-webdav-section" style="display:none">
+      <label>WebDAV 服务器 URL</label>
+      <input type="text" id="setting-webdav-url" placeholder="https://nextcloud.example.com/remote.php/dav/files/用户名/cc-manager-backup" />
+      <label>WebDAV 用户名</label>
+      <input type="text" id="setting-webdav-user" placeholder="（可选，留空则无认证）" />
+      <label>WebDAV 密码（环境变量 CC_MANAGER_WEBDAV_PASS，不在 UI 中填写）</label>
+      <input type="password" id="setting-webdav-pass" placeholder="请设置环境变量" disabled value="********" />
+      <button class="btn btn-sm" id="btn-webdav-test" style="margin-bottom:12px">测试 WebDAV 连接</button>
+    </div>
+
+    <label>自动备份间隔（分钟，0=关闭）</label>
+    <input type="number" id="setting-interval" value="60" min="0" max="1440" />
+    <div class="modal-message" id="settings-message" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn" id="settings-close">关闭</button>
+      <button class="btn btn-primary" id="settings-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 恢复模态框 -->
+<div id="restore-modal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>↩️ 恢复备份</h3>
+    <div id="restore-list" style="margin: 12px 0">
+      <p style="color:var(--text-muted)">加载中…</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="restore-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ==============================
+// cc-manager Web UI
+// ==============================
+
+const API = '';
+
+// ========== State ==========
+const state = {
+  cli: 'claude',
+  projects: [],
+  projectName: null,
+  sessions: [],
+  filteredSessions: [],
+  currentSession: null,
+  content: null,
+  sort: 'time-desc',
+  search: '',
+  searchScope: 'content',
+  _searchResults: null,
+  favorites: {}
+};
+
+// ========== DOM 引用 ==========
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+// ========== API 工具 ==========
+async function api(path, opts = {}) {
+  const url = API + path;
+  const resp = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: resp.statusText }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ========== 顶栏 ==========
+$('#btn-backup').onclick = async () => {
+  $('#btn-backup').disabled = true;
+  $('#btn-backup').textContent = '⏳ 备份中…';
+  $('#status-text').textContent = '正在备份…';
+  try {
+    const r = await api('/api/backup/run', { method: 'POST' });
+    if (r.results && r.results.length) {
+      // 逐目标显示结果
+      const lines = r.results.map(res =>
+        (res.ok ? '✅' : '❌') + ' ' + res.target + ': ' + (res.message || res.error || '?')
+      );
+      $('#status-text').textContent = r.ok ? '✅ 备份完成' : '❌ 部分失败';
+      showToast(lines.join('\n'), r.ok ? 'success' : 'error');
+    } else {
+      $('#status-text').textContent = r.message || (r.ok ? '备份完成' : '备份失败');
+      showToast(r.message || (r.ok ? '备份完成' : (r.error || '?')), r.ok ? 'success' : 'error');
+    }
+  } catch (e) {
+    $('#status-text').textContent = '备份失败: ' + e.message;
+    showToast(e.message, 'error');
+  } finally {
+    $('#btn-backup').disabled = false;
+    $('#btn-backup').textContent = '☁️ 一键备份';
+  }
+};
+
+$('#btn-settings').onclick = () => {
+  api('/api/backup/status').then(s => {
+    $('#setting-target').value = s.backupTarget || 'local';
+    $('#setting-repo').value = s.repoUrl || '';
+    $('#setting-branch').value = 'main';
+    $('#setting-webdav-url').value = s.webdavUrl || '';
+    $('#setting-local-dir').value = s.localBackupDir || '';
+    $('#setting-interval').value = s.autoIntervalMin || 60;
+    $('#settings-message').style.display = 'none';
+    toggleSettingSections();
+    $('#settings-modal').style.display = 'flex';
+  }).catch(e => showToast(e.message, 'error'));
+};
+
+$('#setting-target').onchange = toggleSettingSections;
+function toggleSettingSections() {
+  const t = $('#setting-target').value;
+  $('#setting-local-section').style.display = (t === 'local' || t === 'all') ? '' : 'none';
+  $('#setting-github-section').style.display = (t === 'github' || t === 'all') ? '' : 'none';
+  $('#setting-webdav-section').style.display = (t === 'webdav' || t === 'all') ? '' : 'none';
+}
+
+$('#settings-close').onclick = () => $('#settings-modal').style.display = 'none';
+$('#settings-save').onclick = async () => {
+  try {
+    const r = await api('/api/backup/config', {
+      method: 'POST',
+      body: JSON.stringify({
+        backupTarget: $('#setting-target').value,
+        repoUrl: $('#setting-repo').value.trim(),
+        branch: $('#setting-branch').value.trim() || 'main',
+        webdavUrl: $('#setting-webdav-url').value.trim(),
+        webdavUsername: $('#setting-webdav-user').value.trim(),
+        localBackupDir: $('#setting-local-dir').value.trim(),
+        autoIntervalMin: parseInt($('#setting-interval').value) || 0
+      })
+    });
+    $('#settings-message').textContent = '✓ 已保存';
+    $('#settings-message').className = 'modal-message success';
+    $('#settings-message').style.display = 'block';
+  } catch (e) {
+    $('#settings-message').textContent = '✗ ' + e.message;
+    $('#settings-message').className = 'modal-message error';
+    $('#settings-message').style.display = 'block';
+  }
+};
+
+// WebDAV 测试连接
+$('#btn-webdav-test').onclick = async () => {
+  const btn = $('#btn-webdav-test');
+  btn.disabled = true;
+  btn.textContent = '⏳ 测试中…';
+  try {
+    const r = await api('/api/backup/webdav-test', { method: 'POST' });
+    showToast(r.ok ? '✅ ' + r.message : '❌ ' + r.error, r.ok ? 'success' : 'error');
+  } catch (e) {
+    showToast('❌ ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '测试 WebDAV 连接';
+  }
+};
+
+$('#btn-restore').onclick = async () => {
+  $('#restore-modal').style.display = 'flex';
+  const list = $('#restore-list');
+  list.innerHTML = '<p style="color:var(--text-muted)">加载中…</p>';
+  try {
+    const history = await api('/api/backup/history');
+    if (!history.length) {
+      list.innerHTML = '<p>暂无备份历史</p>';
+      return;
+    }
+    list.innerHTML = history.map((h, i) => {
+      const d = new Date(h.timestamp).toLocaleString();
+      return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:13px">
+        <span style="flex:1">${d} — ${h.message}</span>
+        <code style="font-size:11px;color:var(--text-muted)">${h.hash.slice(0,8)}</code>
+        <button class="btn btn-sm btn-primary" onclick="restoreFromCommit('${h.hash}')">恢复</button>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<p style="color:var(--danger)">✗ ${e.message}</p>`;
+  }
+};
+
+$('#restore-close').onclick = () => $('#restore-modal').style.display = 'none';
+
+window.restoreFromCommit = async (hash) => {
+  if (!confirm(`确定从 ${hash.slice(0,8)} 恢复备份？现有会话会被覆盖。`)) return;
+  try {
+    const r = await api('/api/backup/restore', { method: 'POST', body: JSON.stringify({ hash }) });
+    if (r.ok) {
+      showToast(r.message, 'success');
+      // 刷新当前视图
+      loadSessions();
+    } else {
+      showToast(r.error, 'error');
+    }
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+};
+
+// ========== Toast 提示 ==========
+function showToast(msg, type) {
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;bottom:24px;right:24px;padding:10px 20px;border-radius:8px;font-size:13px;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.15);transition:all .3s;background:${type === 'error' ? '#fee2e2;color:#dc2626' : '#f0fdf4;color:#16a34a'}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3000);
+}
+
+// ========== 左侧：CLI 标签 ==========
+function renderCliTabs() {
+  const container = $('#cli-tabs');
+  ['claude', 'codex'].forEach(cli => {
+    const tab = document.createElement('div');
+    tab.className = 'cli-tab' + (cli === state.cli ? ' active' : '');
+    tab.textContent = cli.charAt(0).toUpperCase() + cli.slice(1);
+    tab.onclick = () => switchCli(cli);
+    container.appendChild(tab);
+  });
+}
+
+async function switchCli(cli) {
+  state.cli = cli;
+  state.projectName = null;
+  state.sessions = [];
+  state.filteredSessions = [];
+  state.currentSession = null;
+  state.content = null;
+
+  // 更新 tab 高亮
+  $$('.cli-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.cli-tab:nth-child(${['claude','codex'].indexOf(cli) + 1})`).classList.add('active');
+
+  await loadProjects();
+}
+
+// ========== 左侧：项目列表 ==========
+async function loadProjects() {
+  try {
+    state.projects = await api(`/api/cli/${state.cli}/projects`);
+  } catch (e) {
+    state.projects = [];
+    $('#status-text').textContent = '加载项目失败: ' + e.message;
+  }
+  renderProjects();
+  if (state.projects.length > 0) {
+    selectProject(state.projects[0].name);
+  } else {
+    $('#project-list').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">暂无会话</div>';
+    $('#session-list').innerHTML = '';
+    $('#session-count').textContent = '0';
+  }
+}
+
+function renderProjects() {
+  const container = $('#project-list');
+  container.innerHTML = state.projects.map(p => {
+    const activeClass = p.name === state.projectName ? ' active' : '';
+    return `<div class="project-item${activeClass}" data-name="${p.name}">
+      <div class="path">📁 ${p.displayPath}</div>
+      <div class="count">${p.sessionCount} 个会话</div>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.project-item').forEach(el => {
+    el.onclick = () => selectProject(el.dataset.name);
+  });
+}
+
+function selectProject(name) {
+  state.projectName = name;
+  $$('.project-item').forEach(el => el.classList.toggle('active', el.dataset.name === name));
+  loadSessions();
+}
+
+// ========== 中栏：会话列表 ==========
+async function loadSessions() {
+  if (!state.projectName) return;
+  try {
+    const raw = await api(`/api/cli/${state.cli}/project/${encodeURIComponent(state.projectName)}/sessions`);
+    state.sessions = raw;
+  } catch (e) {
+    state.sessions = [];
+    $('#status-text').textContent = '加载会话失败: ' + e.message;
+  }
+  // 加载后清除旧搜索标记
+  state._searchResults = null;
+  applyFilters();
+}
+
+async function applyFilters() {
+  let list = [...state.sessions];
+
+  // ---------- 搜索 ----------
+  if (state.search && state.search.trim()) {
+    const q = state.search.trim();
+    const scope = state.searchScope || 'content';
+
+    if (scope === 'title') {
+      // 仅标题：本地过滤，最快
+      list = filterByTitle(list, q);
+    } else {
+      // 先本地过标题（即时反馈）
+      const titleMatched = filterByTitle(list, q);
+      list = titleMatched;
+
+      // 再异步调后端搜内容
+      doContentSearch(q, scope, list, titleMatched);
+    }
+  } else {
+    state._searchResults = null;
+  }
+
+  // ---------- 排序 ----------
+  sortSessions(list);
+
+  // ---------- 收藏置顶 ----------
+  const faved = list.filter(s => s.favorite);
+  const others = list.filter(s => !s.favorite);
+  list = [...faved, ...others];
+
+  state.filteredSessions = list;
+  renderSessions();
+
+  // 清失焦预览
+  if (state.currentSession && !list.find(s => s.id === state.currentSession.id)) {
+    state.currentSession = null;
+    state.content = null;
+    clearPreview();
+  }
+}
+
+function filterByTitle(list, q) {
+  const lower = q.toLowerCase();
+  return list.filter(s =>
+    s.title.toLowerCase().includes(lower) ||
+    s.subtitle.toLowerCase().includes(lower) ||
+    (s.alias && s.alias.toLowerCase().includes(lower))
+  );
+}
+
+// 防抖 + 内容搜索
+let _searchTimer = null;
+function doContentSearch(q, scope, list, titleMatched) {
+  if (_searchTimer) clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(async () => {
+    if (!state.projectName) return;
+    try {
+      const isRegex = scope === 'regex' ? 'true' : 'false';
+      const url = `/api/cli/${state.cli}/project/${encodeURIComponent(state.projectName)}/search?q=${encodeURIComponent(q)}&regex=${isRegex}`;
+      const results = await api(url);
+      if (Array.isArray(results) && results.length) {
+        // 合并：已经在 titleMatched 里的加上匹配标记，不在的补进来
+        const matchedIds = new Set(titleMatched.map(s => s.id));
+        const extraIds = new Set(results.map(r => r.sessionId));
+        const currentIds = new Set(list.map(s => s.id));
+        // 补充只有内容匹配但标题不匹配的会话
+        for (const r of results) {
+          if (!currentIds.has(r.sessionId)) {
+            // 从 state.sessions 找到原数据
+            const full = state.sessions.find(s => s.id === r.sessionId);
+            if (full) {
+              full._contentMatch = true;
+              list.push(full);
+            }
+          }
+        }
+        // 给已匹配的加标记
+        list.forEach(s => {
+          if (matchedIds.has(s.id) || extraIds.has(s.id)) {
+            s._searchHighlight = true;
+          }
+        });
+        // 重新排序
+        sortSessions(list);
+        const faved = list.filter(s => s.favorite);
+        const others = list.filter(s => !s.favorite);
+        list = [...faved, ...others];
+        state.filteredSessions = list;
+        renderSessions();
+      }
+    } catch (e) { /* 静默失败，标题搜索已经给了结果 */ }
+  }, 300);
+}
+
+function sortSessions(list) {
+  switch (state.sort) {
+    case 'time-desc': list.sort((a, b) => b.lastActivity - a.lastActivity); break;
+    case 'time-asc': list.sort((a, b) => a.lastActivity - b.lastActivity); break;
+    case 'title': list.sort((a, b) => a.title.localeCompare(b.title)); break;
+    case 'count': list.sort((a, b) => b.messageCount - a.messageCount); break;
+  }
+}
+
+function renderSessions() {
+  const container = $('#session-list');
+  $('#session-count').textContent = state.filteredSessions.length;
+
+  container.innerHTML = state.filteredSessions.map(s => {
+    const active = state.currentSession && s.id === state.currentSession.id ? ' active' : '';
+    const fav = s.favorite ? '<span class="favorite-star">★</span>' : '';
+    const aliasTag = s.alias ? `<span class="alias-tag">${escapeHtml(s.alias)}</span>` : '';
+    const contentMatchTag = s._contentMatch ? `<span class="alias-tag" style="background:#fef3c7;color:#92400e">🔍 内容匹配</span>` : '';
+    const date = s.lastActivity ? new Date(s.lastActivity).toLocaleString() : '';
+    return `<div class="session-item${active}" data-id="${s.id}">
+      <div class="title-row">
+        <span class="title">${escapeHtml(s.title)}</span>
+        ${fav}
+        ${aliasTag}
+        ${contentMatchTag}
+      </div>
+      <div class="subtitle">${s.subtitle}</div>
+      <div class="meta-line">
+        <span>${s.messageCount} 条</span>
+        <span>${date}</span>
+      </div>
+      <div class="actions">
+        <button class="btn-icon" onclick="event.stopPropagation();toggleFavorite('${s.id}')" title="收藏">${s.favorite ? '★' : '☆'}</button>
+        <button class="btn-icon" onclick="event.stopPropagation();setAlias('${s.id}')" title="别名">✏️</button>
+        <button class="btn-icon" onclick="event.stopPropagation();forkSession('${s.id}')" title="Fork">🔀</button>
+        <button class="btn-icon" onclick="event.stopPropagation();deleteSession('${s.id}')" title="删除">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.session-item').forEach(el => {
+    el.onclick = () => selectSession(el.dataset.id);
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ========== 筛选与排序事件 ==========
+$('#sort-select').onchange = () => {
+  state.sort = $('#sort-select').value;
+  applyFilters();
+};
+
+$('#search-input').oninput = () => {
+  state.search = $('#search-input').value;
+  applyFilters();
+};
+
+$('#search-scope').onchange = () => {
+  state.searchScope = $('#search-scope').value;
+  // 切换搜索范围时，清空已有搜索缓存
+  state._searchResults = null;
+  if (state.search) applyFilters();
+};
+
+// ========== 右栏：会话预览 ==========
+async function selectSession(sessionId) {
+  const session = state.filteredSessions.find(s => s.id === sessionId);
+  if (!session) return;
+  state.currentSession = session;
+
+  // 更新列表高亮
+  $$('.session-item').forEach(el => el.classList.toggle('active', el.dataset.id === sessionId));
+
+  // 加载内容
+  try {
+    const url = `/api/cli/${state.cli}/session/${sessionId}?projectName=${encodeURIComponent(state.projectName)}`;
+    state.content = await api(url);
+    renderPreview();
+    $('#btn-export').style.display = '';
+    $('#btn-delete').style.display = '';
+  } catch (e) {
+    $('#preview-content').innerHTML = `<div class="empty-state"><span>✗ 加载失败: ${e.message}</span></div>`;
+  }
+}
+
+function renderPreview() {
+  const title = state.currentSession.alias || state.currentSession.title;
+  const subtitle = state.currentSession.subtitle;
+  $('#preview-title').textContent = title + '  ' + subtitle.slice(0, 8);
+
+  const container = $('#preview-content');
+  if (!state.content || !state.content.length) {
+    container.innerHTML = '<div class="empty-state">(空会话)</div>';
+    return;
+  }
+
+  // 只保留"真正"的聊天消息
+  const chatMessages = state.content.filter(msg =>
+    ['user', 'assistant', 'tool'].includes(msg.type || msg.role || '')
+  );
+
+  if (!chatMessages.length) {
+    container.innerHTML = '<div class="empty-state">(无聊天内容)</div>';
+    return;
+  }
+
+  // 辅助：从 tool_result 的 content 字段提取纯文本
+  function extractToolContent(part) {
+    const c = part.content;
+    if (!c) return '';
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      return c.map(b => (b.type === 'text' && b.text) ? b.text :
+                       (b.type === 'output_text' && b.text) ? b.text : '').join('\n').trim();
+    }
+    return String(c);
+  }
+
+  // 判断一条 user 消息是否只有 tool_result 块（没有用户输入文本）
+  function isPureToolResult(msg) {
+    if (msg.type !== 'user') return false;
+    const raw = msg.message ? msg.message.content : null;
+    if (!Array.isArray(raw)) return false;
+    return raw.every(p => p.type === 'tool_result');
+  }
+
+  const navItems = [];  // {label, index} 导航条目
+
+  container.innerHTML = chatMessages.map((msg, idx) => {
+    const type = msg.type || msg.role || 'unknown';
+    let cssClass = ['user', 'assistant', 'tool'].includes(type) ? type : 'unknown';
+
+    let contentHtml = '';
+    let toolCalls = [];
+    let hasToolResult = false;
+    let toolResultText = '';
+
+    // --- 判断是否纯工具结果消息 → 灰底 ---
+    const pureToolResult = isPureToolResult(msg);
+    if (pureToolResult) cssClass += ' tool-result-wrap';
+
+    const rawContent = msg.message ? msg.message.content : null;
+
+    // ---------- 从 msg.message.content 解析 ----------
+    if (rawContent && Array.isArray(rawContent)) {
+      for (const part of rawContent) {
+        if (part.type === 'text' && part.text) {
+          contentHtml += escapeHtml(part.text) + '\n';
+        } else if (part.type === 'thinking' && part.thinking) {
+          contentHtml += `<details class="thinking-details" style="margin:4px 0">
+            <summary style="cursor:pointer;color:var(--text-muted);font-size:12px">💭 思考过程</summary>
+            <pre style="font-size:12px;color:#888;margin-top:4px;max-height:200px;overflow-y:auto;white-space:pre-wrap">${escapeHtml(part.thinking)}</pre>
+          </details>\n`;
+        } else if (part.type === 'tool_use') {
+          toolCalls.push({
+            name: part.name,
+            id: part.id,
+            input: part.input ? JSON.stringify(part.input, null, 2) : ''
+          });
+        } else if (part.type === 'tool_result') {
+          hasToolResult = true;
+          toolResultText = extractToolContent(part);
+        }
+      }
+    }
+
+    // ---------- 渲染工具调用卡片（在上面） ----------
+    for (const tc of toolCalls) {
+      contentHtml += `<div class="tool-call" style="margin:4px 0;padding:6px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px">
+        <strong>🔧 ${escapeHtml(tc.name)}</strong>
+        <pre style="margin:4px 0 0 0;font-size:11px;overflow-x:auto;color:#555;max-height:150px;overflow-y:auto">${tc.input ? escapeHtml(tc.input) : '(无参数)'}</pre>
+      </div>\n`;
+    }
+
+    // ---------- 渲染工具结果（可折叠） ----------
+    if (hasToolResult) {
+      const isShort = toolResultText.length < 200 && toolResultText.split('\n').length < 10;
+      contentHtml += `<details class="tool-result-details" style="margin:4px 0" ${isShort ? 'open' : ''}>
+        <summary style="cursor:pointer;color:var(--text-muted);font-size:12px">📎 工具结果${isShort ? '' : '（点击展开）'}</summary>
+        <pre class="tool-result-pre" style="margin:4px 0 0 0;font-size:11px;background:#f8fafc;padding:6px 10px;border-radius:6px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">${escapeHtml(toolResultText)}</pre>
+      </details>\n`;
+    }
+
+    // ---------- 纯字符串 content 格式 ----------
+    if (typeof rawContent === 'string' && !contentHtml && !hasToolResult) {
+      contentHtml = escapeHtml(rawContent);
+    }
+
+    // ---------- 没有 msg.message 的老格式 ----------
+    if (!rawContent && type === 'tool') {
+      contentHtml = `<div class="tool-call" style="margin:4px 0;padding:6px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px">
+        <strong>🔧 ${escapeHtml(msg.name || '工具')}</strong>
+        <pre style="margin:4px 0;font-size:11px;color:#555">${escapeHtml(JSON.stringify(msg.input || msg.output || '', null, 2))}</pre>
+      </div>`;
+    }
+
+    // --- 收集导航条目：每条 user 非工具结果消息 ——
+    if (type === 'user' && !pureToolResult && contentHtml.trim()) {
+      const label = contentHtml.replace(/<[^>]+>/g, '').trim().slice(0, 50);
+      if (label) navItems.push({ label, index: idx });
+    }
+
+    return `<div class="msg ${cssClass}" id="msg-${idx}">
+      <div class="label">${type.toUpperCase()}${hasToolResult && type === 'assistant' ? ' 📎' : ''}</div>
+      <div class="content">${contentHtml || '<em>（空）</em>'}</div>
+    </div>`;
+  }).join('');
+
+  container.scrollTop = container.scrollHeight;
+
+  // ---------- 渲染导航 ----------
+  renderNav(navItems);
+  const navBtn = $('#preview-nav-btn');
+  if (navItems.length > 3) {
+    navBtn.style.display = '';
+    // 默认打开导航
+    navOpen = true;
+    $('#preview-nav').classList.add('open');
+    navBtn.classList.add('active');
+  } else {
+    navBtn.style.display = 'none';
+    navOpen = false;
+    $('#preview-nav').classList.remove('open');
+    navBtn.classList.remove('active');
+  }
+}
+
+function renderNav(items) {
+  const list = $('#preview-nav-list');
+  if (!items.length) {
+    list.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--text-muted)">（无）</div>';
+    return;
+  }
+  list.innerHTML = items.map((item, i) =>
+    `<div class="nav-item" data-idx="${item.index}" onclick="scrollToMsg(${item.index})">
+      ${i + 1}. ${escapeHtml(item.label)}
+    </div>`
+  ).join('');
+}
+
+function scrollToMsg(idx) {
+  const el = document.getElementById(`msg-${idx}`);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // 高亮当前导航项
+    $$('.nav-item').forEach(n => n.classList.toggle('active', parseInt(n.dataset.idx) === idx));
+  }
+}
+
+// 导航开关
+let navOpen = false;
+$('#preview-nav-btn').onclick = () => {
+  navOpen = !navOpen;
+  $('#preview-nav').classList.toggle('open', navOpen);
+  $('#preview-nav-btn').classList.toggle('active', navOpen);
+};
+
+function clearPreview() {
+  $('#preview-title').textContent = '选择会话以预览';
+  $('#preview-content').innerHTML = '<div class="empty-state"><span>← 选择一个会话</span></div>';
+  $('#btn-export').style.display = 'none';
+  $('#btn-delete').style.display = 'none';
+  $('#preview-nav-btn').style.display = 'none';
+  navOpen = false;
+  $('#preview-nav').classList.remove('open');
+}
+
+// ========== 导出 Markdown ==========
+$('#btn-export').onclick = async () => {
+  if (!state.currentSession) return;
+  try {
+    const url = `/api/cli/${state.cli}/session/${state.currentSession.id}/export?projectName=${encodeURIComponent(state.projectName)}`;
+    const blob = await fetch(url).then(r => {
+      if (!r.ok) throw new Error('导出失败');
+      return r.blob();
+    });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${state.currentSession.subtitle || state.currentSession.id}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast('已导出为 Markdown', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+};
+
+// ========== 收藏 ==========
+async function toggleFavorite(sessionId) {
+  const session = state.sessions.find(s => s.id === sessionId);
+  if (!session) return;
+  const newVal = !session.favorite;
+  try {
+    await api(`/api/meta/${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ favorite: newVal, cli: state.cli, projectName: state.projectName })
+    });
+    session.favorite = newVal;
+    applyFilters();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ========== 别名 ==========
+let aliasSessionId = null;
+$('#alias-cancel').onclick = () => { $('#alias-modal').style.display = 'none'; aliasSessionId = null; };
+$('#alias-save').onclick = async () => {
+  if (!aliasSessionId) return;
+  const val = $('#alias-input').value.trim();
+  try {
+    await api(`/api/meta/${aliasSessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ alias: val || null, cli: state.cli, projectName: state.projectName })
+    });
+    const session = state.sessions.find(s => s.id === aliasSessionId);
+    if (session) session.alias = val || null;
+    $('#alias-modal').style.display = 'none';
+    aliasSessionId = null;
+    applyFilters();
+    if (state.currentSession && state.currentSession.id === aliasSessionId) {
+      renderPreview();
+    }
+    showToast(val ? '别名已设置' : '别名已清除', 'success');
+  } catch (e) { showToast(e.message, 'error'); }
+};
+
+function setAlias(sessionId) {
+  aliasSessionId = sessionId;
+  const session = state.sessions.find(s => s.id === sessionId);
+  $('#alias-input').value = (session && session.alias) || '';
+  $('#alias-modal').style.display = 'flex';
+  $('#alias-input').focus();
+}
+
+// ========== Fork ==========
+async function forkSession(sessionId) {
+  if (!confirm('Fork 将创建此会话的副本，基于当前内容新建一个会话？')) return;
+  try {
+    const r = await api(`/api/session/${state.cli}/${sessionId}/fork`, {
+      method: 'POST',
+      body: JSON.stringify({ projectName: state.projectName })
+    });
+    if (r.ok) {
+      showToast('Fork 完成，新会话ID: ' + r.newSessionId.slice(0, 8), 'success');
+      await loadSessions();
+    } else {
+      showToast(r.error || 'Fork 失败', 'error');
+    }
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ========== 删除 ==========
+async function deleteSession(sessionId) {
+  if (!confirm(`确定将会话移到 trash（回收站）？可以手动恢复。`)) return;
+  try {
+    const r = await api(`/api/session/${state.cli}/${sessionId}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ projectName: state.projectName })
+    });
+    if (r.ok) {
+      showToast('已移到 trash', 'success');
+      // 从本地状态移除
+      state.sessions = state.sessions.filter(s => s.id !== sessionId);
+      if (state.currentSession && state.currentSession.id === sessionId) {
+        state.currentSession = null;
+        state.content = null;
+        clearPreview();
+      }
+      applyFilters();
+    } else {
+      showToast(r.error || '删除失败', 'error');
+    }
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ========== 删除按钮（预览头）==========
+$('#btn-delete').onclick = () => {
+  if (state.currentSession) deleteSession(state.currentSession.id);
+};
+
+// ========== 初始化 ==========
+renderCliTabs();
+switchCli('claude');
+</script>
+</body>
+</html>
