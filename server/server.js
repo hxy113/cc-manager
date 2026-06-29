@@ -5,6 +5,14 @@ const routes = require('./routes');
 const store = require('./store');
 const backup = require('./backup');
 
+// 全局异常保护——不因任何意外错误崩溃进程
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err.message?.slice(0, 200));
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err?.message?.slice(0, 200));
+});
+
 const DEFAULT_PORT = 17890;
 
 function startServer(port) {
@@ -17,6 +25,12 @@ function startServer(port) {
 
   // REST API
   app.use(routes);
+
+  // Express 全局错误处理
+  app.use((err, req, res, next) => {
+    console.error('[express error]', err?.message?.slice(0, 200));
+    res.status(500).json({ error: err?.message || '内部错误' });
+  });
 
   // 兜底：返回前端 index.html（SPA）
   app.get('*', (req, res) => {
