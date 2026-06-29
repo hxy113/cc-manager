@@ -96,7 +96,7 @@ function updateConfig(updates) {
   return current;
 }
 
-// 提取消息内容文本
+// 提取消息内容文本（对 tool_result 展开实际内容，对 tool_use 展示输入）
 function extractContent(msg) {
   const raw = msg.message ? msg.message.content : msg.content;
   if (!raw) return '';
@@ -107,9 +107,21 @@ function extractContent(msg) {
     const texts = [];
     for (const part of raw) {
       if (part.type === 'text') texts.push(part.text);
-      else if (part.type === 'tool_use') texts.push(`[工具调用: ${part.name}]`);
-      else if (part.type === 'tool_result') texts.push(`[工具结果]`);
-      else if (part.type === 'thinking') texts.push(`[思考过程]`);
+      else if (part.type === 'tool_use') {
+        const input = part.input ? '\n' + JSON.stringify(part.input, null, 2) : '';
+        texts.push(`[工具调用: ${part.name}]${input}`);
+      } else if (part.type === 'tool_result') {
+        let content = '';
+        if (typeof part.content === 'string') content = part.content;
+        else if (Array.isArray(part.content)) {
+          content = part.content.map(b => b.text || b.content || '').join('\n').trim();
+        }
+        // 截取过长输出
+        if (content.length > 2000) content = content.slice(0, 2000) + '\n...（输出过长，已截断）';
+        texts.push(content || '[工具结果]');
+      } else if (part.type === 'thinking' && part.thinking) {
+        texts.push(`[思考过程]\n${part.thinking.slice(0, 500)}`);
+      }
     }
     return texts.join('\n');
   }
@@ -118,11 +130,11 @@ function extractContent(msg) {
 }
 
 // ========== 导出为 Markdown ==========
-function exportSessionAsMarkdown(messages, sessionId) {
+function exportSessionAsMarkdown(messages, sessionId, sessionTitle) {
   if (!messages || !messages.length) return '# (空会话)\n';
 
-  let md = `# 会话: ${sessionId}\n`;
-  md += `> 共 ${messages.length} 条消息\n\n---\n\n`;
+  let md = `# ${sessionTitle || sessionId}\n`;
+  md += `> 会话 ID: ${sessionId}  |  共 ${messages.length} 条消息\n\n---\n\n`;
 
   for (const msg of messages) {
     const type = msg.type || 'unknown';
@@ -132,12 +144,11 @@ function exportSessionAsMarkdown(messages, sessionId) {
     // 跳过系统事件行
     if (['mode', 'permission-mode', 'attachment', 'file-history-snapshot'].includes(type)) continue;
 
-    md += `### ${role.toUpperCase()} ${timestamp ? `(${timestamp})` : ''}\n\n`;
-    md += extractContent(msg) + '\n\n';
+    const extracted = extractContent(msg);
+    if (!extracted && type === 'tool') continue;  // 纯工具消息无文本则跳过
 
-    if (type === 'tool') {
-      md += '> `[工具调用]`' + (msg.name ? ' ' + msg.name : '') + '\n\n';
-    }
+    md += `### ${role.toUpperCase()} ${timestamp ? `(${timestamp})` : ''}\n\n`;
+    md += extracted + '\n\n';
   }
 
   return md;

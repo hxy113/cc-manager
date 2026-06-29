@@ -190,12 +190,24 @@ router.get('/api/session/:cli/:sessionId/export', (req, res) => {
   if (!adapter) return res.status(404).json({ error: '未知 CLI' });
 
   try {
-    const content = adapter.getSessionContent(req.params.sessionId, req.query.projectName);
+    const projectName = req.query.projectName;
+    const content = adapter.getSessionContent(req.params.sessionId, projectName);
     if (!content) return res.status(404).json({ error: '会话未找到' });
 
-    const md = store.exportSessionAsMarkdown(content, req.params.sessionId);
+    // 找到会话标题
+    let sessionTitle = req.params.sessionId;
+    if (projectName) {
+      const sessions = adapter.getSessions(projectName);
+      const found = sessions.find(s => s.id === req.params.sessionId);
+      if (found && found.title) sessionTitle = found.title;
+    }
+
+    const md = store.exportSessionAsMarkdown(content, req.params.sessionId, sessionTitle);
+
+    // 文件名：标题去掉非法字符 + .md
+    const safeName = sessionTitle.replace(/[<>:"/\\|?*]/g, '_').slice(0, 80) || req.params.sessionId.slice(0, 8);
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${req.params.sessionId}.md"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}.md"`);
     res.send(md);
   } catch (e) {
     res.status(500).json({ error: e.message });
