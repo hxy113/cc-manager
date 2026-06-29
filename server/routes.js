@@ -204,8 +204,8 @@ router.get('/api/session/:cli/:sessionId/export', (req, res) => {
 
     const md = store.exportSessionAsMarkdown(content, req.params.sessionId, sessionTitle);
 
-    // 文件名：标题去掉非法字符 + .md
-    const safeName = sessionTitle.replace(/[<>:"/\\|?*]/g, '_').slice(0, 80) || req.params.sessionId.slice(0, 8);
+    // 文件名：标题去掉非法字符 + .md。非 ASCII 字符用 encodeURI 处理
+    const safeName = encodeURIComponent(sessionTitle.replace(/[<>:"/\\|?*]/g, '_').slice(0, 80)) || req.params.sessionId.slice(0, 8);
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}.md"`);
     res.send(md);
