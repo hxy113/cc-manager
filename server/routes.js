@@ -177,7 +177,8 @@ router.post('/api/session/:cli/:sessionId/delete', (req, res) => {
     const trashName = `${ts}_${path.basename(session.file)}`;
     const trashPath = path.join(trashDir, trashName);
 
-    require('fs').renameSync(session.filePath, trashPath);
+    require('fs').copyFileSync(session.filePath, trashPath);
+    require('fs').unlinkSync(session.filePath);
     store.updateMeta(req.params.sessionId, { hidden: true });
 
     res.json({ ok: true, trashPath, message: '已移动到 trash' });
