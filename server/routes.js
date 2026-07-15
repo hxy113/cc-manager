@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const claude = require('./adapters/claude');
 const codex = require('./adapters/codex');
 const store = require('./store');
@@ -168,8 +169,9 @@ router.post('/api/session/:cli/:sessionId/delete', (req, res) => {
     const session = sessions.find(s => s.id === req.params.sessionId);
     if (!session) return res.status(404).json({ error: '会话未找到' });
 
-    const trashDir = path.join(require('path').dirname(require.main.filename), '..', '..', 'trash');
-    require('./store').ensureDir(trashDir);
+    // trash 目录 = claudecode/trash/（与 CLAUDE.md 约定一致）
+    const trashDir = path.resolve(__dirname, '..', '..', 'trash');
+    store.ensureDir(trashDir);
 
     const ts = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
     const trashName = `${ts}_${path.basename(session.file)}`;
