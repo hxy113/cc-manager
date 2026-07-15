@@ -203,9 +203,13 @@ function getSessionContent(sessionId, projectName) {
   if (!fs.existsSync(filePath)) return null;
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    return content.trim().split('\n')
-      .filter(l => l.trim())
-      .map(l => JSON.parse(l));
+    const result = [];
+    for (const line of content.trim().split('\n')) {
+      if (!line.trim()) continue;
+      try { result.push(JSON.parse(line)); }
+      catch (e) { /* 跳过解析失败的行（如活跃会话写到一半的末行）*/ }
+    }
+    return result;
   } catch (e) { return null; }
 }
 

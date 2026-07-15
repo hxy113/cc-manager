@@ -329,6 +329,7 @@ async function asyncRunBackup() {
 
   // 无论哪种备份方式，都对 workspace git 做一次提交以便恢复历史可查
   try {
+    const wd = store.BACKUP_WORKSPACE;
     runGit(['add', '-A'], wd);
     const raw = runGit(['status', '--porcelain'], wd);
     if (raw.trim()) {

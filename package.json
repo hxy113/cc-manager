@@ -10,7 +10,8 @@
     "start": "node server/index.js ui",
     "ui": "node server/index.js ui",
     "backup": "node server/index.js backup",
-    "restore": "node server/index.js restore"
+    "restore": "node server/index.js restore",
+    "test": "node test/run.js"
   },
   "repository": {
     "type": "git",
