@@ -112,37 +112,30 @@ router.get('/api/favorites', (req, res) => {
 });
 
 // ========== Fork ==========
+// 复制会话为新副本：读原始行（保留原格式）-> 用新 sessionId 写新文件，永不覆盖源文件
 router.post('/api/session/:cli/:sessionId/fork', (req, res) => {
   const adapter = adapters[req.params.cli];
   if (!adapter) return res.status(404).json({ error: '未知 CLI' });
+  if (!adapter.getRawLines || !adapter.writeFork) {
+    return res.status(400).json({ error: '该 CLI 不支持 fork' });
+  }
 
   try {
     const projectName = req.body.projectName;
-    const content = adapter.getSessionContent(req.params.sessionId, projectName);
-    if (!content) return res.status(404).json({ error: '源会话未找到' });
 
     // 找源文件路径
     const sessions = adapter.getSessions(projectName);
     const srcSession = sessions.find(s => s.id === req.params.sessionId);
     if (!srcSession) return res.status(404).json({ error: '源会话记录未找到' });
 
-    const fs = require('fs');
-    const path = require('path');
-
-    // 生成新的 sessionId（Node 18+ 支持 randomUUID）
     const crypto = require('crypto');
     const newId = crypto.randomUUID();
 
-    // 在新文件名中写入，所有消息的 sessionId 替换为新 ID
-    const srcDir = path.dirname(srcSession.filePath);
-    const newFilePath = path.join(srcDir, `${newId}.jsonl`);
+    // 读原始行（保持原格式，codex 不会被 normalize 成无效格式）
+    const rawLines = adapter.getRawLines(req.params.sessionId, projectName);
+    if (!rawLines) return res.status(404).json({ error: '源会话内容未找到' });
 
-    const lines = content.map(msg => {
-      const updated = { ...msg };
-      if (updated.sessionId) updated.sessionId = newId;
-      return JSON.stringify(updated);
-    });
-    fs.writeFileSync(newFilePath, lines.join('\n'), 'utf-8');
+    const { newFilePath } = adapter.writeFork(rawLines, srcSession.filePath, newId);
 
     // 记录 fork 关系元数据
     store.updateMeta(newId, {
@@ -152,7 +145,7 @@ router.post('/api/session/:cli/:sessionId/fork', (req, res) => {
       timestamp: Date.now()
     });
 
-    res.json({ ok: true, newSessionId: newId, message: 'Fork 成功' });
+    res.json({ ok: true, newSessionId: newId, newFilePath, message: 'Fork 成功' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -83,26 +83,32 @@ async function cmdBackup() {
   }
 
   if (process.argv.includes('--first-push')) {
-    const result = backup.runBackup();
+    const result = await backup.asyncRunBackup();
     if (result.ok) {
-      console.log('✓ 首次备份成功！配置完成。');
+      console.log('✓ 首次备份完成。', result.message || '');
+      if (result.results) {
+        for (const r of result.results) {
+          if (!r.ok) console.warn('  ⚠', r.target + ':', r.error || r.message);
+        }
+      }
     } else {
-      console.error('首次备份失败:', result.error);
+      console.error('首次备份失败:', result.error || result.message);
     }
     return;
   }
 
   // 普通备份
   console.log('正在备份会话文件...');
-  const result = backup.runBackup();
+  const result = await backup.asyncRunBackup();
   if (result.ok) {
     console.log('✓', result.message || '备份完成');
-    if (result.pushError) {
-      console.warn('⚠ 推送失败:', result.pushError);
-      console.warn('请确认 CC_MANAGER_GH_TOKEN 环境变量已设置');
+    if (result.results) {
+      for (const r of result.results) {
+        if (!r.ok) console.warn('  ⚠', r.target + ':', r.error || r.message);
+      }
     }
   } else {
-    console.error('✗ 备份失败:', result.error);
+    console.error('✗ 备份失败:', result.error || result.message);
     process.exit(1);
   }
 }

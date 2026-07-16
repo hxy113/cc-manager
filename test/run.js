@@ -28,6 +28,7 @@ async function testAsync(name, fn) {
 
 // ========== claude 适配器 ==========
 const claude = require('../server/adapters/claude');
+const codex = require('../server/adapters/codex');
 
 test('decodeProjectDir: D--claudecode -> D:\\claudecode', () => {
   assert.strictEqual(claude.decodeProjectDir('D--claudecode'), 'D:\\claudecode');
@@ -231,6 +232,118 @@ test('合并覆盖模式逻辑: 存在则覆盖，不存在则添加', () => {
   assert.strictEqual(fs.readFileSync(path.join(destDir, 'd.jsonl'), 'utf-8'), 'D_ONLY', 'dest 独有应保留');
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ========== Phase 1 回归测试 ==========
+
+// --- bug1: selectBackupTargets（修复 CLI 默认 local 静默空跑）---
+test('selectBackupTargets: all -> github+webdav+local', () => {
+  assert.deepStrictEqual(backup.selectBackupTargets('all'), ['github', 'webdav', 'local']);
+});
+test('selectBackupTargets: local -> [local]（修复 CLI 静默空跑 bug）', () => {
+  assert.deepStrictEqual(backup.selectBackupTargets('local'), ['local']);
+});
+test('selectBackupTargets: github -> [github]', () => {
+  assert.deepStrictEqual(backup.selectBackupTargets('github'), ['github']);
+});
+test('selectBackupTargets: both 向后兼容 -> github+webdav', () => {
+  assert.deepStrictEqual(backup.selectBackupTargets('both'), ['github', 'webdav']);
+});
+test('selectBackupTargets: 未知/空值兜底 local（永不静默空跑）', () => {
+  assert.deepStrictEqual(backup.selectBackupTargets(''), ['local']);
+  assert.deepStrictEqual(backup.selectBackupTargets('bogus'), ['local']);
+  assert.deepStrictEqual(backup.selectBackupTargets(undefined), ['local']);
+});
+
+// --- bug3: wipeWorkspace 清空文件保留 .git ---
+test('wipeWorkspace: 清空工作区文件但保留 .git', () => {
+  const tmp = path.join(os.tmpdir(), `cc-wipe-${Date.now()}`);
+  fs.mkdirSync(path.join(tmp, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, '.git', 'config'), '[core]');
+  fs.writeFileSync(path.join(tmp, 'a.jsonl'), 'A');
+  fs.mkdirSync(path.join(tmp, 'sub'));
+  fs.writeFileSync(path.join(tmp, 'sub', 'b.jsonl'), 'B');
+  backup.wipeWorkspace(tmp);
+  const remaining = fs.readdirSync(tmp);
+  assert.deepStrictEqual(remaining, ['.git'], '应只保留 .git');
+  assert.ok(fs.existsSync(path.join(tmp, '.git', 'config')), '.git 内容应保留');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- bug3: copyWithMode full 模式覆盖同名文件 ---
+test('copyWithMode full: 覆盖同名文件，dest 独有保留', () => {
+  const tmp = path.join(os.tmpdir(), `cc-full-${Date.now()}`);
+  const src = path.join(tmp, 'src'), dest = path.join(tmp, 'dest');
+  fs.mkdirSync(src, { recursive: true });
+  fs.mkdirSync(dest, { recursive: true });
+  fs.writeFileSync(path.join(src, 'a.jsonl'), 'NEW');
+  fs.writeFileSync(path.join(dest, 'a.jsonl'), 'OLD');
+  fs.writeFileSync(path.join(dest, 'extra.jsonl'), 'EXTRA');
+  backup.copyWithMode(src, dest, 'full');
+  assert.strictEqual(fs.readFileSync(path.join(dest, 'a.jsonl'), 'utf-8'), 'NEW', 'full 应覆盖同名文件');
+  assert.strictEqual(fs.readFileSync(path.join(dest, 'extra.jsonl'), 'utf-8'), 'EXTRA', 'dest 独有文件应保留');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- bug2: claude.writeFork 写新文件 + sessionId 替换 + 源文件不动 ---
+test('claude.writeFork: 新文件 <newId>.jsonl + sessionId 替换 + 源文件不动', () => {
+  const tmp = path.join(os.tmpdir(), `cc-fork-claude-${Date.now()}`);
+  fs.mkdirSync(tmp, { recursive: true });
+  const oldId = 'old-uuid-1234';
+  const srcPath = path.join(tmp, `${oldId}.jsonl`);
+  const rawLines = [
+    { type: 'custom-title', customTitle: '测试', sessionId: oldId },
+    { type: 'user', message: { role: 'user', content: '你好' }, sessionId: oldId, uuid: 'u1', timestamp: 1700000000000 }
+  ];
+  fs.writeFileSync(srcPath, rawLines.map(l => JSON.stringify(l)).join('\n'), 'utf-8');
+  const newId = 'new-uuid-5678';
+  const { newFilePath } = claude.writeFork(rawLines, srcPath, newId);
+  assert.ok(newFilePath.endsWith(`${newId}.jsonl`), '新文件名应为 <newId>.jsonl');
+  assert.ok(fs.existsSync(newFilePath), '新文件应存在');
+  const written = fs.readFileSync(newFilePath, 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+  assert.strictEqual(written[0].sessionId, newId, 'custom-title 行 sessionId 应替换');
+  assert.strictEqual(written[1].sessionId, newId, 'user 行 sessionId 应替换');
+  assert.strictEqual(written[1].message.content, '你好', '消息内容应保留');
+  // 源文件未被修改
+  const srcRe = fs.readFileSync(srcPath, 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+  assert.strictEqual(srcRe[0].sessionId, oldId, '源文件不应被修改');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- bug2: codex.writeFork 写 rollout 新文件 + session_meta.payload.id 替换 ---
+test('codex.writeFork: rollout 新文件 + session_meta.payload.id 替换 + 源文件不动', () => {
+  const tmp = path.join(os.tmpdir(), `cc-fork-codex-${Date.now()}`);
+  fs.mkdirSync(tmp, { recursive: true });
+  const oldId = '019e9290-a40d-78d2-8f6b-64ac227776f8';
+  const srcPath = path.join(tmp, `rollout-2026-06-04T20-16-53-${oldId}.jsonl`);
+  const rawLines = [
+    { type: 'session_meta', timestamp: '2026-06-04T12:16:56Z', payload: { id: oldId, cwd: 'D:\\test', timestamp: '2026-06-04T12:16:53Z' } },
+    { type: 'response_item', timestamp: '2026-06-04T12:17:00Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '你好' }] } }
+  ];
+  // 把源文件写到磁盘（writeFork 只用 srcPath 的目录名，不读源文件；源文件应保持不动）
+  fs.writeFileSync(srcPath, rawLines.map(l => JSON.stringify(l)).join('\n'), 'utf-8');
+  const newId = '019e9290-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const { newFilePath } = codex.writeFork(rawLines, srcPath, newId);
+  assert.ok(path.basename(newFilePath).startsWith('rollout-'), '新文件名应以 rollout- 开头');
+  assert.ok(newFilePath.includes(newId), '新文件名应含 newId');
+  const written = fs.readFileSync(newFilePath, 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+  assert.strictEqual(written[0].payload.id, newId, 'session_meta.payload.id 应替换');
+  assert.strictEqual(written[1].payload.content[0].text, '你好', '消息内容应保留');
+  // 源文件未变
+  assert.ok(fs.existsSync(srcPath), '源文件应仍存在');
+  const srcRe = fs.readFileSync(srcPath, 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+  assert.strictEqual(srcRe[0].payload.id, oldId, '源文件 session_meta.id 不应变');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- 适配器暴露 getRawLines / writeFork ---
+test('claude 适配器暴露 getRawLines / writeFork', () => {
+  assert.strictEqual(typeof claude.getRawLines, 'function');
+  assert.strictEqual(typeof claude.writeFork, 'function');
+});
+test('codex 适配器暴露 getRawLines / writeFork', () => {
+  assert.strictEqual(typeof codex.getRawLines, 'function');
+  assert.strictEqual(typeof codex.writeFork, 'function');
 });
 
 // ========== 运行所有测试 ==========

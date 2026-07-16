@@ -275,10 +275,51 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// --- 读取会话原始行（未 normalize，供 fork / 编辑使用）---
+// 与 getSessionContent 不同：这里返回 parseJsonl 的原始行，保留 response_item / session_meta 等结构
+function getRawLines(sessionId, projectName) {
+  const files = scanAllSessionFiles();
+  for (const filePath of files) {
+    if (filePath.includes(sessionId)) {
+      const parsed = parseJsonl(filePath);
+      if (!parsed.length) return null;
+      return parsed;
+    }
+  }
+  return null;
+}
+
+// --- 写一个 fork 副本 ---
+// 新文件名 rollout-<YYYY-MM-DDTHH-MM-SS>-<newId>.jsonl（与 codex 命名一致）
+// session_meta.payload.id 替换为 newId，永不覆盖源文件
+function writeFork(rawLines, srcFilePath, newId) {
+  const dir = path.dirname(srcFilePath);
+  const ts = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+  const newFilePath = path.join(dir, `rollout-${ts}-${newId}.jsonl`);
+
+  const out = [];
+  for (const line of rawLines) {
+    const updated = { ...line };
+    // codex 的会话 id 存在 session_meta.payload.id（payload 可能是对象或字符串）
+    if (updated.type === 'session_meta') {
+      let p = updated.payload;
+      if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) { p = null; } }
+      if (p && typeof p === 'object') {
+        updated.payload = { ...p, id: newId };
+      }
+    }
+    out.push(JSON.stringify(updated));
+  }
+  fs.writeFileSync(newFilePath, out.join('\n') + '\n', 'utf-8');
+  return { newFilePath, newId };
+}
+
 module.exports = {
   name: 'codex',
   getProjects,
   getSessions,
   getSessionContent,
-  searchSessionText
+  searchSessionText,
+  getRawLines,
+  writeFork
 };

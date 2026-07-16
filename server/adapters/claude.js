@@ -258,12 +258,37 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// --- 读取会话原始行（未做任何转换，供 fork / 编辑使用）---
+// Claude 的 getSessionContent 本就返回逐行 JSON.parse 的原始对象，直接复用
+function getRawLines(sessionId, projectName) {
+  return getSessionContent(sessionId, projectName);
+}
+
+// --- 写一个 fork 副本 ---
+// 用新 sessionId 写到同目录新文件 <newId>.jsonl，永不覆盖源文件
+// rawLines: getRawLines 返回的原始行对象数组
+function writeFork(rawLines, srcFilePath, newId) {
+  const dir = path.dirname(srcFilePath);
+  const newFilePath = path.join(dir, `${newId}.jsonl`);
+  const out = [];
+  for (const line of rawLines) {
+    const updated = { ...line };
+    // 顶层 sessionId 替换为新 id（custom-title / user / assistant 等行都有）
+    if (updated.sessionId) updated.sessionId = newId;
+    out.push(JSON.stringify(updated));
+  }
+  fs.writeFileSync(newFilePath, out.join('\n') + '\n', 'utf-8');
+  return { newFilePath, newId };
+}
+
 module.exports = {
   name: 'claude',
   getProjects,
   getSessions,
   getSessionContent,
   searchSessionText,
+  getRawLines,
+  writeFork,
   buildDisplayCache,
   invalidateCache,
   decodeProjectDir,

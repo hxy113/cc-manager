@@ -6,6 +6,18 @@ const store = require('./store');
 
 // ========== 构建备份工作区的快照 ==========
 
+// 清空工作区文件但保留 .git（备份工作区是可随时重建的镜像，非用户数据）
+function wipeWorkspace(dir) {
+  const workspace = dir || store.BACKUP_WORKSPACE;
+  const gitDir = path.join(workspace, '.git');
+  let entries;
+  try { entries = fs.readdirSync(workspace); } catch (e) { return; }
+  for (const entry of entries) {
+    const full = path.join(workspace, entry);
+    if (full !== gitDir) fs.rmSync(full, { recursive: true, force: true });
+  }
+}
+
 function ensureBackupGit() {
   // 确保备份工作区是一个 git 仓库
   if (!fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
@@ -23,12 +35,7 @@ function buildBackupSnapshot() {
   store.ensureDir(store.BACKUP_WORKSPACE);
 
   // 清理旧快照（保留 .git）
-  const gitDir = path.join(store.BACKUP_WORKSPACE, '.git');
-  const entries = fs.readdirSync(store.BACKUP_WORKSPACE);
-  for (const entry of entries) {
-    const full = path.join(store.BACKUP_WORKSPACE, entry);
-    if (full !== gitDir) fs.rmSync(full, { recursive: true, force: true });
-  }
+  wipeWorkspace();
 
   // 复制 Claude 会话
   const claudeProjects = path.join(os.homedir(), '.claude', 'projects');
@@ -95,43 +102,14 @@ function gitSetRemote(repoUrl) {
   }
 }
 
-// 执行一次增量备份（支持 GitHub 和/或 WebDAV）
-function runBackup() {
-  const config = store.getConfig();
-
-  try {
-    buildBackupSnapshot();
-    const timestamp = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
-    let results = [];
-
-    if (config.backupTarget === 'github' || config.backupTarget === 'both') {
-      if (!config.repoUrl) {
-        results.push({ target: 'github', ok: false, error: '未配置仓库 URL' });
-      } else {
-        const gitResult = doGitBackup(config, timestamp);
-        results.push({ target: 'github', ...gitResult });
-      }
-    }
-
-    if (config.backupTarget === 'webdav' || config.backupTarget === 'both') {
-      if (!config.webdavUrl) {
-        results.push({ target: 'webdav', ok: false, error: '未配置 WebDAV URL' });
-      } else {
-        const webdavResult = doWebdavBackup(config, timestamp);
-        results.push({ target: 'webdav', ...webdavResult });
-      }
-    }
-
-    config.lastBackupAt = Date.now();
-    store.updateConfig({ lastBackupAt: config.lastBackupAt });
-
-    // 汇总结果
-    const allOk = results.every(r => r.ok);
-    const messages = results.map(r => r.target + ': ' + (r.message || r.error || '?'));
-    return { ok: allOk, message: messages.join('; '), timestamp, results };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
+// 纯函数：根据 backupTarget 决定要跑哪些备份目标（便于单元测试）
+// 'all' -> github+webdav+local；'both'（向后兼容）-> github+webdav；
+// 单项目标按字面值；未知/未配置 -> 兜底本地（保证不会静默空跑）
+function selectBackupTargets(target) {
+  if (target === 'all') return ['github', 'webdav', 'local'];
+  if (target === 'both') return ['github', 'webdav'];
+  if (['github', 'webdav', 'local'].includes(target)) return [target];
+  return ['local'];
 }
 
 function doGitBackup(config, timestamp) {
@@ -300,31 +278,21 @@ async function asyncRunBackup() {
   const timestamp = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
   let results = [];
 
-  // 判断是否应该运行某个目标
-  const should = (target) => {
-    if (config.backupTarget === 'all') return true;
-    if (config.backupTarget === target) return true;
-    return false;
-  };
-  // 'both' 向后兼容：运行 github + webdav
-  const isBoth = config.backupTarget === 'both';
-  if (should('github') || isBoth) {
-    results.push({ target: 'github', ...(config.repoUrl ? doGitBackup(config, timestamp) : { ok: false, error: '未配置仓库 URL' }) });
-  }
-  if (should('webdav') || isBoth) {
-    if (config.webdavUrl) {
-      const r = await doWebdavBackup(config, timestamp);
-      results.push({ target: 'webdav', ...r });
-    } else {
-      results.push({ target: 'webdav', ok: false, error: '未配置 WebDAV URL' });
+  // 用统一的纯函数决定目标列表（保证默认/未知配置不会静默空跑）
+  const targets = selectBackupTargets(config.backupTarget);
+  for (const t of targets) {
+    if (t === 'github') {
+      results.push({ target: 'github', ...(config.repoUrl ? doGitBackup(config, timestamp) : { ok: false, error: '未配置仓库 URL' }) });
+    } else if (t === 'webdav') {
+      if (config.webdavUrl) {
+        const r = await doWebdavBackup(config, timestamp);
+        results.push({ target: 'webdav', ...r });
+      } else {
+        results.push({ target: 'webdav', ok: false, error: '未配置 WebDAV URL' });
+      }
+    } else if (t === 'local') {
+      results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
     }
-  }
-  if (should('local') || config.backupTarget === 'all') {
-    results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
-  }
-  // 默认（未配置 target 或无效值）至少跑本地备份
-  if (!results.length) {
-    results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
   }
 
   // 无论哪种备份方式，都对 workspace git 做一次提交以便恢复历史可查
@@ -381,14 +349,10 @@ async function restoreFromCommit(hash, cli, mode) {
       execSync(`xcopy "${codexSrc}" "${path.join(backupDir, 'codex-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
     }
 
-    // 2. 把要恢复的 commit 检出到 workspace
-    const oldCwd = process.cwd();
-    process.chdir(store.BACKUP_WORKSPACE);
-    try {
-      execSync(`git checkout ${hash} -- .`, { timeout: 10000, cwd: store.BACKUP_WORKSPACE });
-    } finally {
-      process.chdir(oldCwd);
-    }
+    // 2. 清空工作区（保留 .git）后检出目标 commit
+    //    先清空保证工作区严格等于该 commit，不会残留后续备份新增的文件
+    wipeWorkspace();
+    runGit(['checkout', hash, '--', '.'], store.BACKUP_WORKSPACE);
 
     // 3. 根据模式复制
     const claudeSrcBackup = path.join(store.BACKUP_WORKSPACE, 'claude-sessions');
@@ -401,9 +365,11 @@ async function restoreFromCommit(hash, cli, mode) {
       copyWithMode(codexSrcBackup, codexSrc, mode);
     }
 
-    // 4. 恢复 workspace 回当前状态
+    // 4. 恢复工作区到当前分支（HEAD）
+    //    git checkout <hash> -- . 会同时改 index+worktree，git checkout -- . 只从（已被污染的）index 还原，无法回到 HEAD
+    //    必须用 git reset --hard HEAD 才能把 index+worktree 都恢复到最新备份
     try {
-      runGit(['checkout', '--', '.'], store.BACKUP_WORKSPACE);
+      runGit(['reset', '--hard', 'HEAD'], store.BACKUP_WORKSPACE);
     } catch (e) { /* 忽略 */ }
 
     store.updateConfig({ lastRestoreAt: Date.now() });
@@ -464,10 +430,12 @@ module.exports = {
   buildBackupSnapshot,
   gitInit,
   gitSetRemote,
-  runBackup,
   asyncRunBackup,
   listBackupHistory,
   restoreFromCommit,
   gitAvailable,
-  webdavTestConnection
+  webdavTestConnection,
+  selectBackupTargets,
+  copyWithMode,
+  wipeWorkspace
 };
