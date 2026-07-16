@@ -1000,8 +1000,7 @@ function setAlias(sessionId) {
 
 // ========== 在 CLI 中打开 ==========
 async function openInCli(sessionId) {
-  // 优先用当前选中会话的 id（预览头按钮），否则用列表传入的 id
-  const id = (state.currentSession && state.currentSession.id) || sessionId;
+  const id = sessionId || (state.currentSession && state.currentSession.id);
   if (!id) return;
   try {
     const r = await api(`/api/session/${state.cli}/${id}/open`, {

@@ -216,6 +216,16 @@ router.post('/api/session/:cli/:sessionId/open', (req, res) => {
   const adapter = adapters[req.params.cli];
   if (!adapter) return res.status(404).json({ error: '未知 CLI' });
   const projectName = req.body && req.body.projectName;
+
+  // 先验证会话是否存在（避免开窗口后 claude 报 "session not found"）
+  try {
+    const sessions = adapter.getSessions(projectName);
+    const session = sessions.find(s => s.id === req.params.sessionId);
+    if (!session) return res.status(404).json({ error: '会话未找到' });
+  } catch (e) {
+    return res.status(500).json({ error: '会话查询失败：' + e.message });
+  }
+
   const result = opencli.openSession(req.params.cli, req.params.sessionId, projectName);
   res.json(result);
 });

@@ -359,10 +359,13 @@ test('opencli.isValidSessionId: 合法 uuid 通过，危险输入拒绝', () => 
   assert.ok(!opencli.isValidSessionId(''), '空串应拒绝');
 });
 
-test('opencli.buildOpenCommand: claude/codex 命令正确，未知 CLI 返回 null', () => {
-  assert.strictEqual(opencli.buildOpenCommand('claude', 'uuid-1234-5678'), 'claude --resume uuid-1234-5678');
-  assert.strictEqual(opencli.buildOpenCommand('codex', 'uuid-1234-5678'), 'codex resume uuid-1234-5678');
+test('opencli.buildOpenCommand: 含绝对路径的 resume 命令，未知 CLI 返回 null', () => {
+  const claudeCmd = opencli.buildOpenCommand('claude', 'uuid-1234-5678');
+  const codexCmd = opencli.buildOpenCommand('codex', 'uuid-1234-5678');
+  assert.ok(claudeCmd.includes('claude') && claudeCmd.includes('--resume uuid-1234-5678'), 'claude 命令应含 --resume 和 id');
+  assert.ok(codexCmd.includes('codex') && codexCmd.includes('resume uuid-1234-5678'), 'codex 命令应含 resume 和 id');
   assert.strictEqual(opencli.buildOpenCommand('gemini', 'uuid-1234-5678'), null);
+  assert.strictEqual(opencli.buildOpenCommand(null, 'uuid'), null);
 });
 
 test('opencli.resolveCwd: claude 反解编码目录名', () => {
