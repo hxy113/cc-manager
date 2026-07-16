@@ -4,6 +4,7 @@ const claude = require('./adapters/claude');
 const codex = require('./adapters/codex');
 const store = require('./store');
 const backup = require('./backup');
+const opencli = require('./opencli');
 
 const router = express.Router();
 
@@ -208,6 +209,15 @@ router.get('/api/session/:cli/:sessionId/export', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ========== 在新终端打开会话到 CLI ==========
+router.post('/api/session/:cli/:sessionId/open', (req, res) => {
+  const adapter = adapters[req.params.cli];
+  if (!adapter) return res.status(404).json({ error: '未知 CLI' });
+  const projectName = req.body && req.body.projectName;
+  const result = opencli.openSession(req.params.cli, req.params.sessionId, projectName);
+  res.json(result);
 });
 
 // ========== 备份相关 ==========

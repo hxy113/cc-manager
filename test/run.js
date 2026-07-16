@@ -29,6 +29,7 @@ async function testAsync(name, fn) {
 // ========== claude 适配器 ==========
 const claude = require('../server/adapters/claude');
 const codex = require('../server/adapters/codex');
+const opencli = require('../server/opencli');
 
 test('decodeProjectDir: D--claudecode -> D:\\claudecode', () => {
   assert.strictEqual(claude.decodeProjectDir('D--claudecode'), 'D:\\claudecode');
@@ -344,6 +345,47 @@ test('claude 适配器暴露 getRawLines / writeFork', () => {
 test('codex 适配器暴露 getRawLines / writeFork', () => {
   assert.strictEqual(typeof codex.getRawLines, 'function');
   assert.strictEqual(typeof codex.writeFork, 'function');
+});
+
+// ========== Phase 2 回归测试：opencli ==========
+
+test('opencli.isValidSessionId: 合法 uuid 通过，危险输入拒绝', () => {
+  assert.ok(opencli.isValidSessionId('07efa94d-2e63-44ec-b22f-02d5d5716342'));
+  assert.ok(opencli.isValidSessionId('019e9290-a40d-78d2-8f6b-64ac227776f8'));
+  assert.ok(!opencli.isValidSessionId('rm -rf'), '含空格应拒绝');
+  assert.ok(!opencli.isValidSessionId('a&b'), '特殊字符应拒绝');
+  assert.ok(!opencli.isValidSessionId('a|b'), '管道符应拒绝');
+  assert.ok(!opencli.isValidSessionId('short'), '过短应拒绝');
+  assert.ok(!opencli.isValidSessionId(''), '空串应拒绝');
+});
+
+test('opencli.buildOpenCommand: claude/codex 命令正确，未知 CLI 返回 null', () => {
+  assert.strictEqual(opencli.buildOpenCommand('claude', 'uuid-1234-5678'), 'claude --resume uuid-1234-5678');
+  assert.strictEqual(opencli.buildOpenCommand('codex', 'uuid-1234-5678'), 'codex resume uuid-1234-5678');
+  assert.strictEqual(opencli.buildOpenCommand('gemini', 'uuid-1234-5678'), null);
+});
+
+test('opencli.resolveCwd: claude 反解编码目录名', () => {
+  const r = opencli.resolveCwd('claude', 'D--claudecode');
+  assert.ok(r.cwd, '应返回 cwd');
+  assert.ok(r.cwd.toLowerCase().includes('claudecode'));
+});
+
+test('opencli.resolveCwd: codex projectName 即 cwd', () => {
+  const r = opencli.resolveCwd('codex', 'D:\\test\\proj');
+  assert.strictEqual(r.cwd, 'D:\\test\\proj');
+});
+
+test('opencli.resolveCwd: codex 未关联项目 / claude 无法反解均报错', () => {
+  assert.ok(opencli.resolveCwd('codex', '(未关联项目)').error);
+  assert.ok(opencli.resolveCwd('claude', 'nodashes').error);
+  assert.ok(opencli.resolveCwd('claude', '').error);
+});
+
+test('opencli.openSession: 非法 id 不启动终端', () => {
+  const r = opencli.openSession('claude', 'rm -rf /', 'D--claudecode');
+  assert.ok(!r.ok, '应拒绝');
+  assert.ok(r.error, '应返回错误信息');
 });
 
 // ========== 运行所有测试 ==========

@@ -161,6 +161,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div id="preview-header">
         <button class="btn-icon" id="preview-nav-btn" title="用户输入导航" style="display:none">📋</button>
         <h2 id="preview-title">选择会话以预览</h2>
+        <button class="btn btn-sm" id="btn-open" style="display:none">📂 在 CLI 打开</button>
         <button class="btn btn-sm" id="btn-export" style="display:none">📥 导出 Markdown</button>
         <button class="btn btn-sm btn-danger" id="btn-delete" style="display:none">🗑 删除</button>
       </div>
@@ -663,6 +664,7 @@ function renderSessions() {
         <span>${date}</span>
       </div>
       <div class="actions">
+        <button class="btn-icon" onclick="event.stopPropagation();openInCli('${s.id}')" title="在 CLI 中打开">📂</button>
         <button class="btn-icon" onclick="event.stopPropagation();toggleFavorite('${s.id}')" title="收藏">${s.favorite ? '★' : '☆'}</button>
         <button class="btn-icon" onclick="event.stopPropagation();setAlias('${s.id}')" title="别名">✏️</button>
         <button class="btn-icon" onclick="event.stopPropagation();forkSession('${s.id}')" title="Fork">🔀</button>
@@ -714,6 +716,7 @@ async function selectSession(sessionId) {
     const url = `/api/cli/${state.cli}/session/${sessionId}?projectName=${encodeURIComponent(state.projectName)}`;
     state.content = await api(url);
     renderPreview();
+    $('#btn-open').style.display = '';
     $('#btn-export').style.display = '';
     $('#btn-delete').style.display = '';
   } catch (e) {
@@ -896,6 +899,7 @@ $('#preview-nav-btn').onclick = () => {
 function clearPreview() {
   $('#preview-title').textContent = '选择会话以预览';
   $('#preview-content').innerHTML = '<div class="empty-state"><span>← 选择一个会话</span></div>';
+  $('#btn-open').style.display = 'none';
   $('#btn-export').style.display = 'none';
   $('#btn-delete').style.display = 'none';
   $('#preview-nav-btn').style.display = 'none';
@@ -968,6 +972,25 @@ function setAlias(sessionId) {
   $('#alias-modal').style.display = 'flex';
   $('#alias-input').focus();
 }
+
+// ========== 在 CLI 中打开 ==========
+async function openInCli(sessionId) {
+  // 优先用当前选中会话的 id（预览头按钮），否则用列表传入的 id
+  const id = (state.currentSession && state.currentSession.id) || sessionId;
+  if (!id) return;
+  try {
+    const r = await api(`/api/session/${state.cli}/${id}/open`, {
+      method: 'POST',
+      body: JSON.stringify({ projectName: state.projectName })
+    });
+    if (r.ok) {
+      showToast(r.message || '已打开', 'success');
+    } else {
+      showToast(r.error || '打开失败', 'error');
+    }
+  } catch (e) { showToast(e.message, 'error'); }
+}
+$('#btn-open').onclick = () => { if (state.currentSession) openInCli(state.currentSession.id); };
 
 // ========== Fork ==========
 async function forkSession(sessionId) {

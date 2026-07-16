@@ -2,6 +2,20 @@
 
 本文件记录 cc-manager 的开发变更，便于接手者了解演进。详细历史踩坑见 [HANDOVER.md](./HANDOVER.md)。
 
+## 2026-07-17 Phase 2：一键打开会话到 CLI
+
+### 新增
+
+- **feat: 一键在新终端打开会话到对应 CLI**（`server/opencli.js`、`routes.js`、`web/index.html`）
+  - Claude 会话：`claude --resume <id>`；Codex 会话：`codex resume <id>`，均在会话所属工程目录的新终端窗口启动。
+  - 会话列表 hover 操作区与预览头各加一个「📂 打开」按钮。
+  - 安全：sessionId 白名单校验（仅字母数字连字符，防命令注入）；工程目录不存在时拒绝启动。
+  - 实现：`spawn('cmd', ['/k', cmd], {cwd, detached:true})` 由 detached 创建新控制台窗口、cwd 直接落工程目录，命令本身无 `cd`/`&&`/管道，规避 Windows cmd 引号与特殊字符陷阱。
+
+### 测试
+
+- **test: 36 个测试**（+6：`isValidSessionId`、`buildOpenCommand`、`resolveCwd` 各路径、`openSession` 拒绝非法 id）。
+
 ## 2026-07-17 Phase 1：bug 修复 + 工程化基建
 
 ### 修复
