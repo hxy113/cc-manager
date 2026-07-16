@@ -2,6 +2,29 @@
 
 本文件记录 cc-manager 的开发变更，便于接手者了解演进。详细历史踩坑见 [HANDOVER.md](./HANDOVER.md)。
 
+## 2026-07-17 Phase 3：完整版修改会话（copy-on-write）
+
+### 新增
+
+- **feat: 完整版会话编辑器，copy-on-write 永不覆盖源文件**
+  - 安全设计：编辑 → 用新 sessionId 写新文件，源文件只读不动。与 Claude Code / Codex CLI 的并发写入零竞争。
+  - 后端 `GET /api/session/:cli/:sessionId/raw`：取会话原始行（codex 不 normalize），供编辑器加载。
+  - 后端 `POST /api/session/:cli/:sessionId/edit`：接收修改后的行数组，通过 `writeFork` 写入新文件，记录 `forkedFrom + edited` 元数据。
+  - 前端编辑器（嵌入在预览区）：
+    - 编辑文本：用户输入和 AI 回复的全文直接编辑，`tool_use`/`tool_result`/`thinking` 块只读展示。
+    - 插入消息：在选中位置插入空用户消息或 AI 消息（Claude 和 Codex 都支持恰当的格式构造）。
+    - 删除：单条删除（卡片上 🗑）或批量删除（勾选 → 🗑 删除选中）。
+    - 重排：↑ ↓ 按钮移动消息顺序。
+    - 剪切/粘贴：选中多条 → ✂️ 剪切（深拷贝到剪贴板）→ 📋 粘贴到末尾或选中位置之后。
+    - 退出确认：编辑中切换项目/CLI/会话时弹出确认对话框防止误丢。
+    - 保存：全部操作完成后 💾 保存为新会话 → 自动跳转到新会话预览。
+  - 编辑中预览头按钮（导出/删除/打开/编辑）隐藏，工具栏替换。
+  - 会话列表 hover 操作区加 📝 图标。
+
+### 测试
+
+- **test: 37 个测试**（+1：`POST /edit 缺少 lines 返回 400`）。
+
 ## 2026-07-17 Phase 2：一键打开会话到 CLI
 
 ### 新增

@@ -388,6 +388,34 @@ test('opencli.openSession: 非法 id 不启动终端', () => {
   assert.ok(r.error, '应返回错误信息');
 });
 
+// ========== Phase 3 回归测试：编辑路由 ==========
+
+test('edit 路由：POST /edit 缺少 lines 返回 400', async () => {
+  const http = require('http');
+  const port = 17993;
+  const { startServer } = require('../server/server');
+  const s = startServer(port);
+  await new Promise(r => setTimeout(r, 300)); // 等启动
+  try {
+    const res = await new Promise((ok, fail) => {
+      const req = http.request(`http://localhost:${port}/api/session/claude/bad-id/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => ok({ status: res.statusCode, body: JSON.parse(d) }));
+      });
+      req.write(JSON.stringify({ projectName: 'D--claudecode', lines: null }));
+      req.end();
+      req.on('error', fail);
+    });
+    assert.ok(res.status === 400 || res.body.error, '缺少 lines 应返回错误');
+  } finally {
+    s.server.close(); if (s.backupTimer) clearInterval(s.backupTimer);
+  }
+});
+
 // ========== 运行所有测试 ==========
 async function main() {
   console.log('cc-manager 单元测试\n');

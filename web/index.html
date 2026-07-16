@@ -114,6 +114,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #aaa; }
+
+/* ========== 会话编辑器 ========== */
+.edit-toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--border); flex-shrink:0; position:sticky; top:0; z-index:5; }
+.edit-toolbar .spacer { flex:1; }
+.edit-toolbar .sel-info { font-size:12px; color:var(--text-muted); }
+.edit-list { padding:4px 16px 24px; }
+.edit-card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin:10px 0; }
+.edit-card.user { border-left:3px solid var(--accent); }
+.edit-card.assistant { border-left:3px solid #16a34a; }
+.edit-card.selected { background:#eff6ff; }
+.edit-card-head { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.edit-card-head .role { font-weight:600; font-size:11px; text-transform:uppercase; color:var(--text-muted); }
+.edit-card-head .card-actions { margin-left:auto; display:flex; gap:2px; align-items:center; }
+.edit-card textarea { width:100%; min-height:54px; padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit; line-height:1.5; resize:vertical; }
+.edit-card textarea:focus { outline:none; border-color:var(--accent); }
+.edit-card .tool-readonly { font-size:11px; color:var(--text-muted); background:#f8fafc; border:1px solid #e2e8f0; padding:4px 8px; border-radius:4px; margin-top:4px; white-space:pre-wrap; word-break:break-all; max-height:120px; overflow-y:auto; }
+.edit-card .block-label { font-size:10px; color:var(--text-muted); margin:4px 0 2px; }
+.edit-empty { padding:30px; text-align:center; color:var(--text-muted); font-size:13px; }
 </style>
 </head>
 <body>
@@ -162,6 +180,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <button class="btn-icon" id="preview-nav-btn" title="用户输入导航" style="display:none">📋</button>
         <h2 id="preview-title">选择会话以预览</h2>
         <button class="btn btn-sm" id="btn-open" style="display:none">📂 在 CLI 打开</button>
+        <button class="btn btn-sm" id="btn-edit" style="display:none">📝 编辑</button>
         <button class="btn btn-sm" id="btn-export" style="display:none">📥 导出 Markdown</button>
         <button class="btn btn-sm btn-danger" id="btn-delete" style="display:none">🗑 删除</button>
       </div>
@@ -469,6 +488,7 @@ function renderCliTabs() {
 }
 
 async function switchCli(cli) {
+  if (!leaveEditGuard()) return;
   state.cli = cli;
   state.projectName = null;
   state.sessions = [];
@@ -517,6 +537,7 @@ function renderProjects() {
 }
 
 function selectProject(name) {
+  if (!leaveEditGuard()) return;
   state.projectName = name;
   $$('.project-item').forEach(el => el.classList.toggle('active', el.dataset.name === name));
   loadSessions();
@@ -665,6 +686,7 @@ function renderSessions() {
       </div>
       <div class="actions">
         <button class="btn-icon" onclick="event.stopPropagation();openInCli('${s.id}')" title="在 CLI 中打开">📂</button>
+        <button class="btn-icon" onclick="event.stopPropagation();enterEditMode('${s.id}')" title="编辑（另存为新会话）">📝</button>
         <button class="btn-icon" onclick="event.stopPropagation();toggleFavorite('${s.id}')" title="收藏">${s.favorite ? '★' : '☆'}</button>
         <button class="btn-icon" onclick="event.stopPropagation();setAlias('${s.id}')" title="别名">✏️</button>
         <button class="btn-icon" onclick="event.stopPropagation();forkSession('${s.id}')" title="Fork">🔀</button>
@@ -704,6 +726,7 @@ $('#search-scope').onchange = () => {
 
 // ========== 右栏：会话预览 ==========
 async function selectSession(sessionId) {
+  if (!leaveEditGuard()) return;
   const session = state.filteredSessions.find(s => s.id === sessionId);
   if (!session) return;
   state.currentSession = session;
@@ -717,6 +740,7 @@ async function selectSession(sessionId) {
     state.content = await api(url);
     renderPreview();
     $('#btn-open').style.display = '';
+    $('#btn-edit').style.display = '';
     $('#btn-export').style.display = '';
     $('#btn-delete').style.display = '';
   } catch (e) {
@@ -900,6 +924,7 @@ function clearPreview() {
   $('#preview-title').textContent = '选择会话以预览';
   $('#preview-content').innerHTML = '<div class="empty-state"><span>← 选择一个会话</span></div>';
   $('#btn-open').style.display = 'none';
+  $('#btn-edit').style.display = 'none';
   $('#btn-export').style.display = 'none';
   $('#btn-delete').style.display = 'none';
   $('#preview-nav-btn').style.display = 'none';
@@ -1037,6 +1062,167 @@ async function deleteSession(sessionId) {
 $('#btn-delete').onclick = () => {
   if (state.currentSession) deleteSession(state.currentSession.id);
 };
+
+// ========== 会话编辑器（copy-on-write）==========
+// 编辑永远生成新会话，源文件只读，与 CLI 并发写入零竞争
+const editor = {
+  active: false, origLines: [], entries: [], clipboard: [], selected: new Set(), eidSeq: 1
+};
+
+function leaveEditGuard() {
+  if (!editor.active) return true;
+  if (confirm('正在编辑会话，放弃未保存的修改？')) { editor.active = false; return true; }
+  return false;
+}
+function safeJsonParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+function isMsgLine(cli, line) {
+  if (!line) return false;
+  if (cli === 'claude') return line.type === 'user' || line.type === 'assistant';
+  if (cli === 'codex') {
+    if (line.type !== 'response_item') return false;
+    const p = typeof line.payload === 'string' ? safeJsonParse(line.payload) : line.payload;
+    return p && p.type === 'message';
+  }
+  return false;
+}
+function msgRoleOf(cli, line) {
+  if (cli === 'claude') return line.type;
+  if (cli === 'codex') {
+    const p = typeof line.payload === 'string' ? safeJsonParse(line.payload) : line.payload;
+    return (p && p.role) || 'user';
+  }
+  return 'user';
+}
+function buildEditPoints(cli, line) {
+  const texts = [], tools = [];
+  if (cli === 'claude') {
+    const c = line.message && line.message.content;
+    if (typeof c === 'string') texts.push({ label:'文本', get:()=>line.message.content, set:v=>{line.message.content=v} });
+    else if (Array.isArray(c)) {
+      c.forEach(b => {
+        if (b.type === 'text' && 'text' in b) texts.push({ label:'文本', get:()=>b.text, set:v=>{b.text=v} });
+        else if (b.type === 'thinking' && b.thinking) tools.push('💭 思考: ' + b.thinking.slice(0,120));
+        else if (b.type === 'tool_use') tools.push('🔧 ' + (b.name||'工具') + (b.input?': '+JSON.stringify(b.input).slice(0,200):''));
+        else if (b.type === 'tool_result') {
+          const t = typeof b.content==='string'?b.content:(Array.isArray(b.content)?b.content.map(x=>x.text||'').join('\n'):'');
+          tools.push('📎 工具结果: ' + (t||'').slice(0,200));
+        }
+      });
+    }
+  } else {
+    const p = typeof line.payload==='string'?safeJsonParse(line.payload):line.payload;
+    if (p && Array.isArray(p.content)) {
+      p.content.forEach(b => {
+        if (b.type==='input_text'||b.type==='output_text') texts.push({ label:b.type==='input_text'?'输入':'输出', get:()=>b.text, set:v=>{b.text=v} });
+        else if (b.type==='tool_use') tools.push('🔧 '+(b.name||'工具')+(b.input?': '+JSON.stringify(b.input).slice(0,200):''));
+        else if (b.type==='tool_result') {
+          const t = typeof b.content==='string'?b.content:(Array.isArray(b.content)?b.content.map(x=>x.text||'').join('\n'):'');
+          tools.push('📎 工具结果: '+(t||'').slice(0,200));
+        }
+      });
+    }
+  }
+  return {texts, tools};
+}
+function makeInsertedLine(cli, role) {
+  const ts = Date.now(), iso = new Date(ts).toISOString();
+  const sid = state.currentSession ? state.currentSession.id : '';
+  if (cli === 'claude') {
+    if (role === 'user') return {type:'user', uuid:crypto.randomUUID(), message:{role:'user', content:''}, timestamp:ts, sessionId:sid};
+    return {type:'assistant', uuid:crypto.randomUUID(), message:{role:'assistant', content:[{type:'text', text:''}]}, timestamp:ts, sessionId:sid};
+  }
+  const textType = role === 'user' ? 'input_text' : 'output_text';
+  return {type:'response_item', timestamp:iso, payload:{type:'message', role, content:[{type:textType, text:''}]}};
+}
+async function enterEditMode(sessionId) {
+  const sess = state.sessions.find(s=>s.id===sessionId)||(state.filteredSessions||[]).find(s=>s.id===sessionId)||state.currentSession;
+  if (!sess) { showToast('找不到会话','error'); return; }
+  state.currentSession = sess;
+  $$('.session-item').forEach(el=>el.classList.toggle('active', el.dataset.id===sessionId));
+  try {
+    const url = `/api/session/${state.cli}/${sessionId}/raw?projectName=${encodeURIComponent(state.projectName)}`;
+    const data = await api(url);
+    editor.origLines = data.lines || [];
+    editor.entries = []; editor.selected.clear(); editor.clipboard = []; editor.eidSeq = 1;
+    editor.origLines.forEach(line => {if (isMsgLine(state.cli, line)) editor.entries.push({eid:editor.eidSeq++, line, role:msgRoleOf(state.cli,line), inserted:false});});
+    editor.active = true;
+    ['btn-edit','btn-export','btn-delete','btn-open'].forEach(id=>$(id).style.display='none');
+    $('#preview-nav-btn').style.display='none'; $('#preview-nav').classList.remove('open');
+    renderEditor();
+  } catch(e) { showToast('加载失败: '+e.message, 'error'); }
+}
+function exitEditMode() {
+  editor.active = false; editor.entries=[]; editor.origLines=[]; editor.selected.clear(); editor.clipboard=[];
+  if (state.currentSession) selectSession(state.currentSession.id); else clearPreview();
+}
+function editToolbarInner() {
+  const sel = editor.selected.size;
+  return `<button class="btn btn-sm" onclick="editInsert('user')">➕ 用户消息</button>
+<button class="btn btn-sm" onclick="editInsert('assistant')">➕ AI 消息</button>
+<span style="width:8px;display:inline-block"></span>
+<button class="btn btn-sm" onclick="editCut()" ${sel?'':'disabled'}>✂️ 剪切选中</button>
+<button class="btn btn-sm" onclick="editPaste()" ${editor.clipboard.length?'':'disabled'}>📋 粘贴 (${editor.clipboard.length})</button>
+<button class="btn btn-sm btn-danger" onclick="editDeleteSelected()" ${sel?'':'disabled'}>🗑 删除选中</button>
+<span class="sel-info">${sel?'已选 '+sel+' 条':''}</span>
+<span class="spacer"></span>
+<button class="btn btn-sm" onclick="exitEditMode()">取消</button>
+<button class="btn btn-sm btn-primary" onclick="saveEdit()">💾 保存为新会话</button>`;
+}
+function renderEditCard(e, i) {
+  const {texts,tools}=buildEditPoints(state.cli,e.line); e.__texts=texts;
+  const sel=editor.selected.has(e.eid)?' selected':'', roleLabel=e.role==='user'?'用户':'AI';
+  const textareas=texts.map((t,ti)=>`<div class="block-label">${escapeHtml(t.label)}</div><textarea oninput="editOnInput(${e.eid},${ti},this.value)" placeholder="(空)">${escapeHtml(t.get()||'')}</textarea>`).join('');
+  const textHtml=textareas||'<div class="block-label" style="color:#aaa">无可编辑文本（仅工具块，可删除整条）</div>';
+  const toolHtml=tools.map(t=>`<div class="tool-readonly">${escapeHtml(t)}</div>`).join('');
+  return `<div class="edit-card ${e.role}${sel}" data-eid="${e.eid}"><div class="edit-card-head">
+<input type="checkbox" ${editor.selected.has(e.eid)?'checked':''} onchange="editToggle(${e.eid},this.checked)">
+<span class="role">${roleLabel}${e.inserted?' ＋新':''}</span><span class="card-actions">
+<button class="btn-icon" onclick="editMove(${e.eid},-1)" title="上移">↑</button>
+<button class="btn-icon" onclick="editMove(${e.eid},1)" title="下移">↓</button>
+<button class="btn-icon" onclick="editDeleteOne(${e.eid})" title="删除">🗑</button></span></div>
+${textHtml}${toolHtml}</div>`;
+}
+function renderEditor(scrollEid) {
+  $('#preview-title').textContent=(state.currentSession.alias||state.currentSession.title||'')+'  [编辑中]';
+  const container=$('#preview-content'), prevScroll=container.scrollTop;
+  const listHtml=editor.entries.length
+    ? '<div class="edit-list">'+editor.entries.map((e,i)=>renderEditCard(e,i)).join('')+'</div>'
+    : '<div class="edit-empty">（空，可插入新消息后再保存）</div>';
+  container.innerHTML=`<div class="edit-toolbar" id="edit-toolbar">${editToolbarInner()}</div>${listHtml}`;
+  if (scrollEid) {const c=container.querySelector(`.edit-card[data-eid="${scrollEid}"]`); if(c) c.scrollIntoView({block:'nearest'});}
+  else container.scrollTop=prevScroll;
+}
+function refreshEditToolbar() {const tb=$('#edit-toolbar'); if(tb) tb.innerHTML=editToolbarInner();}
+function editOnInput(eid,ti,v){const e=editor.entries.find(x=>x.eid===eid); if(e&&e.__texts&&e.__texts[ti]) e.__texts[ti].set(v);}
+function editToggle(eid,on){if(on)editor.selected.add(eid);else editor.selected.delete(eid);const c=document.querySelector(`.edit-card[data-eid="${eid}"]`); if(c)c.classList.toggle('selected',on); refreshEditToolbar();}
+function editMove(eid,dir){const i=editor.entries.findIndex(x=>x.eid===eid),j=i+dir; if(i<0||j<0||j>=editor.entries.length) return; [editor.entries[i],editor.entries[j]]=[editor.entries[j],editor.entries[i]]; renderEditor(eid);}
+function editDeleteOne(eid){editor.entries=editor.entries.filter(x=>x.eid!==eid); editor.selected.delete(eid); renderEditor();}
+function editDeleteSelected(){if(!editor.selected.size)return; editor.entries=editor.entries.filter(x=>!editor.selected.has(x.eid)); editor.selected.clear(); renderEditor();}
+function editCut(){if(!editor.selected.size)return; editor.clipboard=editor.entries.filter(x=>editor.selected.has(x.eid)).map(x=>({line:JSON.parse(JSON.stringify(x.line)),role:x.role})); editor.entries=editor.entries.filter(x=>!editor.selected.has(x.eid)); editor.selected.clear(); renderEditor();}
+function lastSelIdx(){let idx=-1; editor.entries.forEach((x,i)=>{if(editor.selected.has(x.eid))idx=i;}); return idx;}
+function editPaste(){if(!editor.clipboard.length)return; const at=editor.selected.size?lastSelIdx()+1:editor.entries.length, newE=editor.clipboard.map(c=>({eid:editor.eidSeq++,line:JSON.parse(JSON.stringify(c.line)),role:c.role,inserted:true})); editor.entries.splice(at,0,...newE); renderEditor(newE.length?newE[newE.length-1].eid:undefined);}
+function editInsert(role){const line=makeInsertedLine(state.cli,role); const at=editor.selected.size?lastSelIdx()+1:editor.entries.length; const e={eid:editor.eidSeq++,line,role,inserted:true}; editor.entries.splice(at,0,e); renderEditor(e.eid);}
+async function saveEdit() {
+  if (!editor.entries.length && !confirm('会话为空，仍保存为新会话？')) return;
+  const editedMsgLines=editor.entries.map(e=>e.line), out=[];
+  let ptr=0;
+  for(let i=0; i<editor.origLines.length; i++) {
+    const l=editor.origLines[i];
+    if(isMsgLine(state.cli,l)){if(ptr<editedMsgLines.length){out.push(editedMsgLines[ptr]);ptr++;}}
+    else out.push(l);
+  }
+  while(ptr<editedMsgLines.length){out.push(editedMsgLines[ptr]);ptr++;}
+  try {
+    const r=await api(`/api/session/${state.cli}/${state.currentSession.id}/edit`,{method:'POST',body:JSON.stringify({projectName:state.projectName,lines:out})});
+    if(r.ok) {
+      showToast((r.message||'已保存')+'，新会话: '+r.newSessionId.slice(0,8),'success');
+      editor.active=false; await loadSessions();
+      const ns=state.sessions.find(s=>s.id===r.newSessionId);
+      if(ns) selectSession(r.newSessionId); else {state.currentSession=null; clearPreview();}
+    } else showToast(r.error||'保存失败','error');
+  } catch(e){showToast(e.message,'error');}
+}
+$('#btn-edit').onclick = () => { if (state.currentSession) enterEditMode(state.currentSession.id); };
 
 // ========== 初始化 ==========
 renderCliTabs();

@@ -220,6 +220,57 @@ router.post('/api/session/:cli/:sessionId/open', (req, res) => {
   res.json(result);
 });
 
+// ========== 编辑会话（copy-on-write：写新会话，永不覆盖源文件）==========
+
+// 取会话原始行（供编辑器加载；与 getSessionContent 不同，codex 不 normalize）
+router.get('/api/session/:cli/:sessionId/raw', (req, res) => {
+  const adapter = adapters[req.params.cli];
+  if (!adapter) return res.status(404).json({ error: '未知 CLI' });
+  if (!adapter.getRawLines) return res.status(400).json({ error: '该 CLI 不支持编辑' });
+  try {
+    const projectName = req.query.projectName || undefined;
+    const lines = adapter.getRawLines(req.params.sessionId, projectName);
+    if (!lines) return res.status(404).json({ error: '会话未找到' });
+    res.json({ cli: req.params.cli, sessionId: req.params.sessionId, lines });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 保存编辑：用修改后的行写一个新会话（新 id），源文件永不改动
+router.post('/api/session/:cli/:sessionId/edit', (req, res) => {
+  const adapter = adapters[req.params.cli];
+  if (!adapter) return res.status(404).json({ error: '未知 CLI' });
+  if (!adapter.writeFork) return res.status(400).json({ error: '该 CLI 不支持编辑' });
+  try {
+    const projectName = req.body && req.body.projectName;
+    const lines = req.body && req.body.lines;
+    if (!Array.isArray(lines)) return res.status(400).json({ error: '缺少 lines 数组' });
+
+    // 找源文件路径（用于确定新文件落点 + 同目录写入）
+    const sessions = adapter.getSessions(projectName);
+    const srcSession = sessions.find(s => s.id === req.params.sessionId);
+    if (!srcSession) return res.status(404).json({ error: '源会话记录未找到' });
+
+    const crypto = require('crypto');
+    const newId = crypto.randomUUID();
+    // writeFork 用新 id 写新文件，源文件不动 -> 与 CLI 并发写入零竞争
+    const { newFilePath } = adapter.writeFork(lines, srcSession.filePath, newId);
+
+    store.updateMeta(newId, {
+      forkedFrom: req.params.sessionId,
+      cli: req.params.cli,
+      projectName: projectName,
+      edited: true,
+      timestamp: Date.now()
+    });
+
+    res.json({ ok: true, newSessionId: newId, newFilePath, message: '已保存为新会话（源未改动）' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ========== 备份相关 ==========
 
 // 获取备份状态
