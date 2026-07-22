@@ -51,10 +51,10 @@ function startServer(port) {
       const ts = new Date().toLocaleString();
       process.stdout.write(`[${ts}] 自动备份... `);
       try {
-        const r = await backup.asyncRunBackup();
+        const r = await backup.asyncRunBackup(true);
         if (r.results && r.results.length) {
           const parts = r.results.map(res =>
-            (res.ok ? '✓' : '✗') + res.target + ':' + (res.message || res.error || '?').slice(0, 40)
+            (res.ok ? '✓' : '✗') + res.target + ':' + (res.message || res.error || '?').slice(0, 50)
           );
           console.log(parts.join(' | '));
         } else {
@@ -64,7 +64,7 @@ function startServer(port) {
         console.error('失败:', e.message);
       }
     }, intervalMs);
-    console.log(`自动备份: 每 ${config.autoIntervalMin} 分钟一次`);
+    console.log(`自动备份: 每 ${config.autoIntervalMin} 分钟一次（增量模式）`);
   }
 
   return { app, server, backupTimer };

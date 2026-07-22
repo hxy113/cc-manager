@@ -70,11 +70,13 @@ function getFavorites(cli) {
 const DEFAULT_CONFIG = {
   repoUrl: '',
   branch: 'main',
-  autoIntervalMin: 60,
-  backupTarget: 'local',    // 'github' | 'webdav' | 'local' | 'all'
+  autoIntervalMin: 1440,
+  backupTarget: 'local',
   webdavUrl: '',
   webdavUsername: '',
   localBackupDir: '',
+  autoBackupMtime: 0,
+  lastAutoBackupDir: '',
   lastBackupAt: null,
   lastRestoreAt: null
 };

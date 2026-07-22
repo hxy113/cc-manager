@@ -254,13 +254,11 @@ async function webdavTestConnection() {
 }
 
 async function doLocalBackup(config, timestamp) {
-  // 默认路径：~/cc-manager-local-backups/YYYY-MM-DD_HHmmss/
   const baseDir = config.localBackupDir || path.join(os.homedir(), 'cc-manager-local-backups');
   const backupDir = path.join(baseDir, timestamp);
   try {
     fs.mkdirSync(backupDir, { recursive: true });
 
-    // 用 xcopy 复制（和 buildBackupSnapshot 同样策略）
     const src = store.BACKUP_WORKSPACE;
     if (fs.existsSync(src)) {
       execSync(`xcopy "${src}" "${backupDir}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
@@ -272,18 +270,82 @@ async function doLocalBackup(config, timestamp) {
   }
 }
 
-async function asyncRunBackup() {
+// 增量备份：只复制 mtime > refMtime 的文件
+// 不依赖任何元数据索引，只靠文件修改时间判断
+async function doDiffBackup(config, timestamp, refMtime) {
+  const baseDir = config.localBackupDir || path.join(os.homedir(), 'cc-manager-local-backups');
+  const backupDir = path.join(baseDir, `auto-${timestamp}`);
+  let totalCopied = 0;
+  let maxMtime = 0;
+
+  try {
+    fs.mkdirSync(backupDir, { recursive: true });
+
+    // 扫描原始源目录，只复制比 refMtime 新的文件
+    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
+    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
+
+    function copyNewer(srcRoot, destRoot) {
+      if (!fs.existsSync(srcRoot)) return;
+      const files = [];
+      function walk(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) walk(full);
+          else if (e.name.endsWith('.jsonl')) files.push(full);
+        }
+      }
+      walk(srcRoot);
+      for (const f of files) {
+        try {
+          const stat = fs.statSync(f);
+          if (stat.mtimeMs > refMtime) {
+            const rel = path.relative(srcRoot, f);
+            const destFile = path.join(destRoot, rel);
+            fs.mkdirSync(path.dirname(destFile), { recursive: true });
+            fs.copyFileSync(f, destFile);
+            totalCopied++;
+            if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
+          }
+        } catch (e) { /* 跳过 */ }
+      }
+    }
+
+    copyNewer(claudeSrc, path.join(backupDir, 'claude-sessions'));
+    copyNewer(codexSrc, path.join(backupDir, 'codex-sessions'));
+
+    if (maxMtime > 0) {
+      // 也备份元数据
+      const metaFile = path.join(store.CC_MANAGER_DIR, 'meta.json');
+      if (fs.existsSync(metaFile)) {
+        fs.copyFileSync(metaFile, path.join(backupDir, 'cc-manager-meta.json'));
+      }
+      return { ok: true, message: `增量备份 ${totalCopied} 个文件到 ${backupDir}`, dir: backupDir, maxMtime };
+    }
+    // 没有新文件：删除刚建的空目录，返回无变更
+    try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch (e) {}
+    return { ok: true, message: '无变更，跳过', skipped: true, maxMtime: refMtime };
+  } catch (e) {
+    return { ok: false, error: '增量备份失败: ' + e.message };
+  }
+}
+
+async function asyncRunBackup(isAuto) {
   const config = store.getConfig();
-  buildBackupSnapshot();
+  if (!isAuto) buildBackupSnapshot(); // 全量备份需要重建 workspace
   const timestamp = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
   let results = [];
+  let newMaxMtime = 0;
 
-  // 用统一的纯函数决定目标列表（保证默认/未知配置不会静默空跑）
   const targets = selectBackupTargets(config.backupTarget);
   for (const t of targets) {
     if (t === 'github') {
+      if (!isAuto) buildBackupSnapshot(); // git 也需要完整 workspace
       results.push({ target: 'github', ...(config.repoUrl ? doGitBackup(config, timestamp) : { ok: false, error: '未配置仓库 URL' }) });
     } else if (t === 'webdav') {
+      if (!isAuto) buildBackupSnapshot();
       if (config.webdavUrl) {
         const r = await doWebdavBackup(config, timestamp);
         results.push({ target: 'webdav', ...r });
@@ -291,11 +353,24 @@ async function asyncRunBackup() {
         results.push({ target: 'webdav', ok: false, error: '未配置 WebDAV URL' });
       }
     } else if (t === 'local') {
-      results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
+      if (isAuto) {
+        const ref = config.autoBackupMtime || 0;
+        const r = await doDiffBackup(config, timestamp, ref);
+        results.push({ target: 'local', ...r });
+        if (r.maxMtime > newMaxMtime) newMaxMtime = r.maxMtime;
+      } else {
+        buildBackupSnapshot();
+        results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
+      }
     }
   }
 
-  // 无论哪种备份方式，都对 workspace git 做一次提交以便恢复历史可查
+  // 更新 autoBackupMtime（自动备份的 diff 基准）
+  if (isAuto && newMaxMtime > 0) {
+    store.updateConfig({ autoBackupMtime: newMaxMtime });
+  }
+
+  // workspace git 提交（仅在非自动备份时执行，自动备份没有 workspace）
   try {
     const wd = store.BACKUP_WORKSPACE;
     runGit(['add', '-A'], wd);
