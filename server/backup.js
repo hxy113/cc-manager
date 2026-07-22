@@ -334,12 +334,23 @@ function listBackupHistory({ page = 1, pageSize = 20 } = {}) {
   if (fs.existsSync(localDir)) {
     try {
       const dirs = fs.readdirSync(localDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && e.name.startsWith('202'));
+        .filter(e => e.isDirectory() && fs.existsSync(path.join(localDir, e.name, 'claude-sessions')));
       for (const entry of dirs) {
         const name = entry.name;
-        const parts = name.split('-').map(Number);
-        if (parts.length >= 6 && !isNaN(parts[0])) {
-          const ts = new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0).getTime();
+        let ts = 0;
+        if (name.startsWith('pre-restore-')) {
+          // pre-restore-2026-06-24-20-02-06 → 去掉前缀再解析
+          const p = name.replace('pre-restore-', '').split('-').map(Number);
+          if (p.length >= 6 && !isNaN(p[0])) {
+            ts = new Date(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0).getTime();
+          }
+        } else {
+          const p = name.split('-').map(Number);
+          if (p.length >= 6 && !isNaN(p[0])) {
+            ts = new Date(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0).getTime();
+          }
+        }
+        if (ts) {
           all.push({ id: path.join(localDir, name), type: 'local', hash: name, timestamp: ts, message: `本地备份 ${name}` });
         }
       }
