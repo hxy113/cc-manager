@@ -313,19 +313,65 @@ async function asyncRunBackup() {
   return { ok: allOk, message: messages.join('; '), timestamp, results };
 }
 
-// 列出备份历史（git log）
-function listBackupHistory(limit = 20) {
-  if (!fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
-    return [];
+// 列出备份历史——合并两个来源：
+// 1.  workspace git 的 commit 历史
+// 2.  ~/cc-manager-local-backups/ 下的目录快照（不受 git commit bug 影响）
+function listBackupHistory(limit = 50) {
+  let entries = [];
+
+  // 来源 A：git commit
+  if (fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
+    try {
+      const log = runGit(['log', `--format=%H__%ct__%s`, `-${limit}`], store.BACKUP_WORKSPACE);
+      const gitEntries = log.trim().split('\n').filter(Boolean).map(line => {
+        const [hash, ts, ...msgParts] = line.split('__');
+        return {
+          id: hash,
+          type: 'git',
+          hash,
+          timestamp: parseInt(ts) * 1000,
+          message: msgParts.join('__')
+        };
+      });
+      entries.push(...gitEntries);
+    } catch (e) { /* 忽略 */ }
   }
-  try {
-    // Windows CMD 会把 | 解释为管道，所以用逗号分隔再替换
-    const log = runGit(['log', `--format=%H__%ct__%s`, `-${limit}`], store.BACKUP_WORKSPACE);
-    return log.trim().split('\n').filter(Boolean).map(line => {
-      const [hash, ts, ...msgParts] = line.split('__');
-      return { hash, timestamp: parseInt(ts) * 1000, message: msgParts.join('__') };
-    });
-  } catch (e) { return []; }
+
+  // 来源 B：本地备份目录
+  const localDir = path.join(os.homedir(), 'cc-manager-local-backups');
+  if (fs.existsSync(localDir)) {
+    try {
+      const dirs = fs.readdirSync(localDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && e.name.startsWith('202')) // 正常备份目录以日期开头
+        .map(e => e.name);
+      for (const name of dirs) {
+        // 从目录名解析时间戳：2026-06-24-13-51-04
+        const parts = name.split('-').map(Number);
+        if (parts.length >= 6 && !isNaN(parts[0])) {
+          const ts = new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0).getTime();
+          const dirPath = path.join(localDir, name);
+          entries.push({
+            id: dirPath,
+            type: 'local',
+            hash: name,
+            timestamp: ts,
+            message: `本地备份 ${name}`
+          });
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // 按时间降序、去重（按 id）
+  entries.sort((a, b) => b.timestamp - a.timestamp);
+  const seen = new Set();
+  entries = entries.filter(e => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+
+  return entries.slice(0, limit);
 }
 
 // 从某个 commit 恢复（mode: incremental / merge / full）
@@ -426,6 +472,45 @@ function copyWithMode(srcDir, destDir, mode) {
   }
 }
 
+// 从本地备份目录恢复
+async function restoreFromLocalBackup(backupPath, cli, mode) {
+  try {
+    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
+    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
+
+    // 安全备份当前状态
+    const safeTs = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
+    const safeDir = path.join(os.homedir(), 'cc-manager-local-backups', `pre-restore-${safeTs}`);
+    fs.mkdirSync(safeDir, { recursive: true });
+    if (fs.existsSync(claudeSrc)) {
+      execSync(`xcopy "${claudeSrc}" "${path.join(safeDir, 'claude-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
+    }
+    if (fs.existsSync(codexSrc)) {
+      execSync(`xcopy "${codexSrc}" "${path.join(safeDir, 'codex-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
+    }
+
+    // 从备份目录复制
+    const claudeBackup = path.join(backupPath, 'claude-sessions');
+    const codexBackup = path.join(backupPath, 'codex-sessions');
+
+    if (!cli || cli === 'claude') {
+      copyWithMode(claudeBackup, claudeSrc, mode || 'incremental');
+    }
+    if (!cli || cli === 'codex') {
+      copyWithMode(codexBackup, codexSrc, mode || 'incremental');
+    }
+
+    store.updateConfig({ lastRestoreAt: Date.now() });
+    return {
+      ok: true,
+      message: `已从本地备份 ${path.basename(backupPath)} ${mode || 'incremental'}恢复，恢复前已备份到 ${safeDir}`,
+      safetyBackup: safeDir
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 module.exports = {
   buildBackupSnapshot,
   gitInit,
@@ -433,6 +518,7 @@ module.exports = {
   asyncRunBackup,
   listBackupHistory,
   restoreFromCommit,
+  restoreFromLocalBackup,
   gitAvailable,
   webdavTestConnection,
   selectBackupTargets,

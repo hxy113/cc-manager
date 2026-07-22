@@ -428,10 +428,15 @@ $('#btn-restore').onclick = async () => {
     const mode = () => $('#restore-mode').value;
     list.innerHTML = history.map((h, i) => {
       const d = new Date(h.timestamp).toLocaleString();
-      return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:13px">
-        <span style="flex:1">${d} — ${h.message}</span>
-        <code style="font-size:11px;color:var(--text-muted)">${h.hash.slice(0,8)}</code>
-        <button class="btn btn-sm btn-primary" onclick="restoreFromCommit('${h.hash}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
+      const typeTag = h.type === 'local'
+        ? '<span style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:1px 5px;border-radius:3px">本地快照</span>'
+        : '<span style="font-size:11px;background:#f0fdf4;color:#16a34a;padding:1px 5px;border-radius:3px">git 版本</span>';
+      const id = h.type === 'local' ? h.id : h.hash;
+      return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:13px">
+        ${typeTag}
+        <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d}</span>
+        <code style="font-size:11px;color:var(--text-muted);flex-shrink:0">${(h.hash||'').slice(0,10)}</code>
+        <button class="btn btn-sm btn-primary" onclick="restoreFromItem('${id}','${h.type}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
       </div>`;
     }).join('');
   } catch (e) {
@@ -441,22 +446,19 @@ $('#btn-restore').onclick = async () => {
 
 $('#restore-close').onclick = () => $('#restore-modal').style.display = 'none';
 
-window.restoreFromCommit = async (hash) => {
+window.restoreFromItem = async (id, type) => {
   const mode = $('#restore-mode').value;
-  if (mode === 'full') {
-    if (!confirm(`完全覆盖模式将用备份完全替换当前会话文件。\n\n确定从 ${hash.slice(0,8)} 完全覆盖？`)) return;
-  } else if (mode === 'merge') {
-    if (!confirm(`合并模式：备份中的会话会覆盖当前版本，备份中无的内容保留。\n\n确定从 ${hash.slice(0,8)} 合并恢复？`)) return;
-  } else {
-    if (!confirm(`增量模式：仅补充当前缺失的会话，已有的不变。\n\n确定从 ${hash.slice(0,8)} 增量恢复？`)) return;
-  }
+  const label = id.slice(0, 12);
+  const modeLabel = mode === 'incremental' ? '增量' : mode === 'merge' ? '合并' : '完全覆盖';
+  if (!confirm(`确定从 ${type === 'local' ? '本地快照' : 'git 版本'} "${label}" 进行${modeLabel}恢复？\n\n恢复前会自动备份当前状态。`)) return;
   try {
+    const body = type === 'local' ? { localPath: id, mode } : { hash: id, mode };
     const r = await api('/api/backup/restore', {
       method: 'POST',
-      body: JSON.stringify({ hash, mode })
+      body: JSON.stringify(body)
     });
     if (r.ok) {
-      showToast(r.message + (r.safetyBackup ? ' | 原状态已备份到: ' + r.safetyBackup : ''), 'success');
+      showToast(r.message + (r.safetyBackup ? ' | 原状态已备份' : ''), 'success');
       loadSessions();
     } else {
       showToast(r.error, 'error');

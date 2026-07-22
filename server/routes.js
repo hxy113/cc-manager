@@ -343,10 +343,15 @@ router.get('/api/backup/history', (req, res) => {
 
 // 从某 commit 恢复
 router.post('/api/backup/restore', async (req, res) => {
-  const { hash, cli, mode } = req.body || {};
-  if (!hash) return res.status(400).json({ error: '需要 hash 参数' });
+  const { hash, cli, mode, localPath } = req.body || {};
+  if (!hash && !localPath) return res.status(400).json({ error: '需要 hash 或 localPath 参数' });
   try {
-    const result = await backup.restoreFromCommit(hash, cli, mode || 'incremental');
+    let result;
+    if (localPath) {
+      result = await backup.restoreFromLocalBackup(localPath, cli, mode || 'incremental');
+    } else {
+      result = await backup.restoreFromCommit(hash, cli, mode || 'incremental');
+    }
     res.json(result);
   } catch (e) {
     res.json({ ok: false, error: e.message });
