@@ -313,65 +313,52 @@ async function asyncRunBackup() {
   return { ok: allOk, message: messages.join('; '), timestamp, results };
 }
 
-// 列出备份历史——合并两个来源：
-// 1.  workspace git 的 commit 历史
-// 2.  ~/cc-manager-local-backups/ 下的目录快照（不受 git commit bug 影响）
-function listBackupHistory(limit = 50) {
-  let entries = [];
+// 列出备份历史——合并两个来源，支持分页
+function listBackupHistory({ page = 1, pageSize = 20 } = {}) {
+  // 第 1 步：收集全部条目（两个来源合并）
+  let all = [];
 
-  // 来源 A：git commit
   if (fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
     try {
-      const log = runGit(['log', `--format=%H__%ct__%s`, `-${limit}`], store.BACKUP_WORKSPACE);
+      // git log 全部拉出来（本地操作，数量不大）
+      const log = runGit(['log', '--format=%H__%ct__%s', '--all'], store.BACKUP_WORKSPACE);
       const gitEntries = log.trim().split('\n').filter(Boolean).map(line => {
         const [hash, ts, ...msgParts] = line.split('__');
-        return {
-          id: hash,
-          type: 'git',
-          hash,
-          timestamp: parseInt(ts) * 1000,
-          message: msgParts.join('__')
-        };
+        return { id: hash, type: 'git', hash, timestamp: parseInt(ts) * 1000, message: msgParts.join('__') };
       });
-      entries.push(...gitEntries);
+      all.push(...gitEntries);
     } catch (e) { /* 忽略 */ }
   }
 
-  // 来源 B：本地备份目录
   const localDir = path.join(os.homedir(), 'cc-manager-local-backups');
   if (fs.existsSync(localDir)) {
     try {
       const dirs = fs.readdirSync(localDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && e.name.startsWith('202')) // 正常备份目录以日期开头
-        .map(e => e.name);
-      for (const name of dirs) {
-        // 从目录名解析时间戳：2026-06-24-13-51-04
+        .filter(e => e.isDirectory() && e.name.startsWith('202'));
+      for (const entry of dirs) {
+        const name = entry.name;
         const parts = name.split('-').map(Number);
         if (parts.length >= 6 && !isNaN(parts[0])) {
           const ts = new Date(parts[0], parts[1] - 1, parts[2], parts[3] || 0, parts[4] || 0, parts[5] || 0).getTime();
-          const dirPath = path.join(localDir, name);
-          entries.push({
-            id: dirPath,
-            type: 'local',
-            hash: name,
-            timestamp: ts,
-            message: `本地备份 ${name}`
-          });
+          all.push({ id: path.join(localDir, name), type: 'local', hash: name, timestamp: ts, message: `本地备份 ${name}` });
         }
       }
     } catch (e) { /* 忽略 */ }
   }
 
-  // 按时间降序、去重（按 id）
-  entries.sort((a, b) => b.timestamp - a.timestamp);
+  // 去重 + 按时间降序
   const seen = new Set();
-  entries = entries.filter(e => {
-    if (seen.has(e.id)) return false;
-    seen.add(e.id);
-    return true;
-  });
+  all = all.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
+  all.sort((a, b) => b.timestamp - a.timestamp);
 
-  return entries.slice(0, limit);
+  // 第 2 步：分页
+  const total = all.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.max(1, Math.min(page, totalPages));
+  const start = (safePage - 1) * pageSize;
+  const entries = all.slice(start, start + pageSize);
+
+  return { entries, total, page: safePage, pageSize, totalPages };
 }
 
 // 从某个 commit 恢复（mode: incremental / merge / full）

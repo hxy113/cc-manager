@@ -414,34 +414,81 @@ $('#btn-webdav-test').onclick = async () => {
   }
 };
 
-$('#btn-restore').onclick = async () => {
-  $('#restore-modal').style.display = 'flex';
-  $('#restore-info').style.display = '';
+let _restorePage = 1, _restoreTotalPages = 1;
+
+async function loadRestoreHistory(page) {
   const list = $('#restore-list');
   list.innerHTML = '<p style="color:var(--text-muted)">加载中…</p>';
   try {
-    const history = await api('/api/backup/history');
-    if (!history.length) {
+    const resp = await api(`/api/backup/history?page=${page}&pageSize=20`);
+    if (!resp.entries || !resp.entries.length) {
       list.innerHTML = '<p>暂无备份历史</p>';
       return;
     }
+    _restorePage = resp.page;
+    _restoreTotalPages = resp.totalPages;
     const mode = () => $('#restore-mode').value;
-    list.innerHTML = history.map((h, i) => {
+    const pageInfo = `<div style="padding:6px 0;font-size:12px;color:var(--text-muted);text-align:center">共 ${resp.total} 条记录，第 ${resp.page}/${resp.totalPages} 页</div>`;
+
+    list.innerHTML = pageInfo + resp.entries.map(h => {
       const d = new Date(h.timestamp).toLocaleString();
       const typeTag = h.type === 'local'
         ? '<span style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:1px 5px;border-radius:3px">本地快照</span>'
         : '<span style="font-size:11px;background:#f0fdf4;color:#16a34a;padding:1px 5px;border-radius:3px">git 版本</span>';
       const id = h.type === 'local' ? h.id : h.hash;
-      return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:13px">
+      return `<div style="padding:8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:13px" title="${escAttr(h.message)}">
         ${typeTag}
         <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d}</span>
         <code style="font-size:11px;color:var(--text-muted);flex-shrink:0">${(h.hash||'').slice(0,10)}</code>
-        <button class="btn btn-sm btn-primary" onclick="restoreFromItem('${id}','${h.type}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
+        <button class="btn btn-sm btn-primary" onclick="restoreFromItem('${escAttr(id)}','${h.type}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
       </div>`;
-    }).join('');
+    }).join('') + renderPagination();
+
+    // 模式切换时保留分页状态
+    $('#restore-mode').onchange = () => loadRestoreHistory(_restorePage);
   } catch (e) {
-    list.innerHTML = `<p style="color:var(--danger)">✗ ${e.message}</p>`;
+    list.innerHTML = `<p style="color:var(--danger)">${escHtml(e.message)}</p>`;
   }
+}
+
+function renderPagination() {
+  if (_restoreTotalPages <= 1) return '';
+  let html = '<div style="display:flex;align-items:center;justify-content:center;gap:4px;padding:10px 0;flex-wrap:wrap">';
+
+  // 上一页
+  html += `<button class="btn btn-sm" onclick="loadRestoreHistory(${_restorePage - 1})" ${_restorePage <= 1 ? 'disabled' : ''}>&lt;</button>`;
+
+  // 页码：显示当前页前后 2 页 + 首尾 + 省略号
+  const pages = [];
+  const total = _restoreTotalPages;
+  const cur = _restorePage;
+  for (let i = 1; i <= total; i++) {
+    if (i === 1 || i === total || (i >= cur - 2 && i <= cur + 2)) pages.push(i);
+    else if (pages[pages.length - 1] !== '...') pages.push('...');
+  }
+  for (const p of pages) {
+    if (p === '...') html += '<span style="font-size:12px;color:var(--text-muted);padding:0 2px">…</span>';
+    else html += `<button class="btn btn-sm" style="${p === cur ? 'background:var(--accent);color:#fff;border-color:var(--accent)' : ''}" onclick="loadRestoreHistory(${p})">${p}</button>`;
+  }
+
+  // 下一页
+  html += `<button class="btn btn-sm" onclick="loadRestoreHistory(${_restorePage + 1})" ${_restorePage >= total ? 'disabled' : ''}>&gt;</button>`;
+
+  // 快速跳转
+  html += `<span style="font-size:12px;color:var(--text-muted);margin-left:6px">跳转</span>
+    <input type="number" id="page-jump" value="${cur}" min="1" max="${total}" style="width:50px;padding:2px 4px;font-size:12px;border:1px solid var(--border);border-radius:4px"
+      onkeydown="if(event.key==='Enter'){const v=parseInt(this.value);if(v>=1&&v<=${total})loadRestoreHistory(v)}" />`;
+
+  return html + '</div>';
+}
+
+function escAttr(str) { return str.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function escHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+
+$('#btn-restore').onclick = () => {
+  $('#restore-modal').style.display = 'flex';
+  $('#restore-info').style.display = '';
+  loadRestoreHistory(1);
 };
 
 $('#restore-close').onclick = () => $('#restore-modal').style.display = 'none';

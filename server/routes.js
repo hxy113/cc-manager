@@ -335,10 +335,11 @@ router.post('/api/backup/webdav-test', async (req, res) => {
   }
 });
 
-// 备份历史
+// 备份历史（分页）
 router.get('/api/backup/history', (req, res) => {
-  const limit = parseInt(req.query.limit) || 20;
-  res.json(backup.listBackupHistory(limit));
+  const page = parseInt(req.query.page) || 1;
+  const pageSize = parseInt(req.query.pageSize) || 20;
+  res.json(backup.listBackupHistory({ page, pageSize }));
 });
 
 // 从某 commit 恢复
