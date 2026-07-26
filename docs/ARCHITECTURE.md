@@ -56,6 +56,7 @@ Express on 127.0.0.1:<port>
 | 配置 | `~/.cc-manager/config.json` | cc-manager | 读写 |
 | Git 工作区 | `~/.cc-manager/backup-workspace/` | cc-manager | 可重建快照，保留 `.git` |
 | 本地备份 | `~/cc-manager-local-backups/` | cc-manager | 新建快照与恢复安全副本 |
+| 同步对象仓库 | `<localBackupDir>/.cc-manager-sync/objects/` | cc-manager | SHA-256 不可变数据块，只增加，不原地覆盖或删除 |
 | 删除回收目录 | 代码仓库上级的 `trash/` | cc-manager | 排他复制后删除源文件 |
 
 `meta.json` 以 `sessionId` 为键，存放 alias、favorite、hidden、forkedFrom、CLI、projectName 和更新时间。它不改变 CLI 原生格式。
@@ -164,15 +165,19 @@ Express on 127.0.0.1:<port>
 | 场景 | local | github | webdav |
 |---|---|---|---|
 | 手动 | 完整工作区目录副本 | 完整工作区 commit/push | 完整工作区逐文件 PUT |
-| 自动 | 直接从源目录生成 mtime diff | 刷新完整工作区后 commit/push | 刷新完整工作区后 PUT |
+| 自动 | 从源目录生成内容寻址同步快照 | 刷新完整工作区后 commit/push | 刷新完整工作区后 PUT |
 
-本地自动 diff：
+本地自动同步：
 
-- 只复制 `mtimeMs > autoBackupMtime` 的 `.jsonl` 和修改过的 `meta.json`；
-- 目录名为 `auto-<timestamp>`；
-- `.diff-ref` 记录上一备份目录与基准 mtime；
-- 无变化时删除空目录并返回 skipped；
-- 成功后更新 `autoBackupMtime` 与 `lastAutoBackupDir`。
+- 扫描 Claude/Codex 的 `.jsonl` 和 `meta.json`，完整读取文件内容，不只依赖 `mtime`；
+- 固定按 4 MiB 分块，每块计算 SHA-256，并仅将仓库中不存在的对象写入 `.cc-manager-sync/objects/<前两位>/<hash>`；
+- `auto-<timestamp>/.sync-manifest.json` 保存该时刻的完整路径→文件哈希→块列表映射，因此任意一份新快照都不依赖长链才能解释；
+- 相对父快照消失的路径进入 `deleted`，记录删除时间、上一快照和原文件哈希。文件从活动视图移走，但旧清单和对象仍是回收站，可追溯且不物理删除；
+- 先在 `.cc-manager-sync/staging/` 写完整清单，再同目录原子重命名发布；无内容变化直接 skipped；
+- 父快照已有某类会话而本轮整个源目录缺失时失败关闭，不把挂载、权限或目录异常误发布为批量删除；
+- 只有发布成功后才更新 `lastAutoBackupDir`。`autoBackupMtime` 只为旧配置兼容保留。
+
+固定分块使 JSONL 末尾追加通常只产生一个新的尾块；相同内容即使来自不同文件也共享对象。源文件扫描开始时记录大小，本轮最多读取该长度，避免活跃日志持续追加导致备份永不结束。
 
 Git 通过 `execFileSync('git', args)` 执行，避免 Windows shell 解释 `%`、`|` 等字符。WebDAV 使用 Node `http/https`，Basic Auth 密码只来自环境变量。
 
@@ -187,7 +192,7 @@ Git 通过 `execFileSync('git', args)` 执行，避免 Windows shell 解释 `%`�
 `listBackupHistory` 合并：
 
 - 内部 Git 的全部 commit；
-- 默认和自定义本地根目录下，可解析时间且包含 `claude-sessions`、`codex-sessions` 或 `.diff-ref` 的目录。
+- 默认和自定义本地根目录下，可解析时间且包含 `claude-sessions`、`codex-sessions`、`.diff-ref` 或 `.sync-manifest.json` 的目录。
 
 结果按时间降序、按 ID 去重后分页。
 
@@ -204,15 +209,18 @@ Git 通过 `execFileSync('git', args)` 执行，避免 Windows shell 解释 `%`�
 
 `finally` 保证复制失败时也尽量恢复内部工作区。
 
-### 本地链式恢复
+### 本地恢复
 
-本地恢复先校验路径真实位于默认或自定义备份根目录。若有 `.diff-ref`，沿 `refDir` 回溯并防止越界/循环，然后从最老层向最新层叠加。
+本地恢复先校验路径真实位于默认或自定义备份根目录。
+
+- 新同步快照：校验清单路径、大小、块哈希和全部所需对象后，直接按完整清单恢复。`full` 中不存在于清单的文件不会进入新活动目录；旧活动目录移动到安全快照，失败的半成品也移动归档并尝试回滚。
+- 旧 `.diff-ref`：沿 `refDir` 回溯并防止越界/循环，然后从最老层向最新层叠加，保持历史兼容。
 
 模式实现：
 
 - `incremental`：只复制活动目录不存在的文件；
 - `merge`：覆盖同名并增加缺失文件，不移除活动目录独有文件；
-- `full`：每种 CLI 在首个有数据层把活动目录移动到安全快照的 `original-*`，新建活动目录，后续 diff 用 merge 叠加。
+- `full`：把活动目录移动到安全快照的 `original-*` 后重建；旧 diff 链的后续层继续用 merge 叠加。
 
 恢复前安全副本总是写入默认 `~/cc-manager-local-backups/pre-restore-*`，不跟随自定义普通备份路径。
 

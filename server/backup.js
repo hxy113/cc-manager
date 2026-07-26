@@ -1,8 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const store = require('./store');
+
+const SYNC_FORMAT = 'cc-manager-sync-v1';
+const SYNC_MANIFEST = '.sync-manifest.json';
+const SYNC_REPO_DIR = '.cc-manager-sync';
+const SYNC_CHUNK_SIZE = 4 * 1024 * 1024;
 
 function copyDirectory(src, dest) {
   if (!fs.existsSync(src)) return false;
@@ -27,7 +33,8 @@ function isPathInside(parent, candidate) {
 function isBackupDirectory(dir) {
   return fs.existsSync(path.join(dir, 'claude-sessions')) ||
     fs.existsSync(path.join(dir, 'codex-sessions')) ||
-    fs.existsSync(path.join(dir, '.diff-ref'));
+    fs.existsSync(path.join(dir, '.diff-ref')) ||
+    fs.existsSync(path.join(dir, SYNC_MANIFEST));
 }
 
 // ========== 构建备份工作区的快照 ==========
@@ -309,81 +316,258 @@ async function doLocalBackup(config, timestamp) {
   }
 }
 
-// 增量备份：只复制 mtime > refMtime 的文件
-// 记录 .diff-ref 元数据，标记"我相对于哪个备份做了 diff"
-async function doDiffBackup(config, timestamp, refMtime, refDir) {
-  const baseDir = config.localBackupDir || defaultLocalBackupDir();
-  const backupDir = path.join(baseDir, `auto-${timestamp}`);
-  let totalCopied = 0;
-  let maxMtime = 0;
+function toManifestPath(prefix, relative) {
+  return [prefix, ...relative.split(path.sep)].filter(Boolean).join('/');
+}
 
+function isSafeManifestPath(relative) {
+  if (typeof relative !== 'string' || !relative || relative.includes('\\') || relative.includes('\0')) return false;
+  if (path.posix.isAbsolute(relative) || path.posix.normalize(relative) !== relative) return false;
+  return relative === 'cc-manager-meta.json' ||
+    relative.startsWith('claude-sessions/') || relative.startsWith('codex-sessions/');
+}
+
+function readSyncManifest(snapshotDir) {
+  const manifestPath = path.join(snapshotDir, SYNC_MANIFEST);
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')); }
+  catch (e) { throw new Error(`同步快照清单不可读: ${e.message}`); }
+  if (!manifest || manifest.format !== SYNC_FORMAT || !manifest.files || typeof manifest.files !== 'object') {
+    throw new Error('同步快照清单格式无效');
+  }
+  for (const [relative, entry] of Object.entries(manifest.files)) {
+    if (!isSafeManifestPath(relative) || !entry || !Array.isArray(entry.chunks) ||
+        !/^[0-9a-f]{64}$/i.test(entry.sha256 || '') || !Number.isSafeInteger(entry.size) || entry.size < 0) {
+      throw new Error(`同步快照文件记录无效: ${relative}`);
+    }
+    let chunkBytes = 0;
+    for (const chunk of entry.chunks) {
+      if (!chunk || !/^[0-9a-f]{64}$/i.test(chunk.sha256 || '') ||
+          !Number.isSafeInteger(chunk.size) || chunk.size < 0 || chunk.size > SYNC_CHUNK_SIZE) {
+        throw new Error(`同步快照数据块记录无效: ${relative}`);
+      }
+      chunkBytes += chunk.size;
+    }
+    if (chunkBytes !== entry.size) throw new Error(`同步快照文件大小不匹配: ${relative}`);
+  }
+  if (manifest.deleted && !Array.isArray(manifest.deleted)) throw new Error('同步快照回收站记录无效');
+  for (const item of manifest.deleted || []) {
+    if (!item || !isSafeManifestPath(item.path)) throw new Error('同步快照回收站路径无效');
+  }
+  return manifest;
+}
+
+function findPreviousSyncSnapshot(baseDir, preferredName) {
+  const root = path.resolve(baseDir);
+  let realRoot;
+  try { realRoot = fs.realpathSync(root); }
+  catch (e) { return null; }
+  const candidates = [];
+  if (preferredName && path.basename(preferredName) === preferredName) candidates.push(preferredName);
   try {
-    fs.mkdirSync(backupDir, { recursive: true });
+    const names = fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith('auto-'))
+      .map(entry => entry.name).sort().reverse();
+    candidates.push(...names);
+  } catch (e) { /* 首次备份时目录可能不存在 */ }
+  for (const name of [...new Set(candidates)]) {
+    const candidate = path.resolve(root, name);
+    let realCandidate;
+    try { realCandidate = fs.realpathSync(candidate); }
+    catch (e) { continue; }
+    if (!isPathInside(realRoot, realCandidate) || !fs.existsSync(path.join(realCandidate, SYNC_MANIFEST))) continue;
+    try { return { dir: realCandidate, manifest: readSyncManifest(realCandidate) }; }
+    catch (e) { /* 损坏快照不能作为新快照的父级 */ }
+  }
+  return null;
+}
 
-    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
-    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
-
-    function copyNewer(srcRoot, destRoot) {
-      if (!fs.existsSync(srcRoot)) return;
-      const files = [];
-      function walk(dir) {
-        let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
-        for (const e of entries) {
-          const full = path.join(dir, e.name);
-          if (e.isDirectory()) walk(full);
-          else if (e.name.endsWith('.jsonl')) files.push(full);
+function collectSyncSourceFiles(sourceRoots) {
+  const files = [];
+  for (const source of sourceRoots) {
+    if (!source || !source.path || !fs.existsSync(source.path)) continue;
+    if (source.file) {
+      const stat = fs.statSync(source.path);
+      if (stat.isFile()) files.push({ source: source.path, relative: source.prefix, stat });
+      continue;
+    }
+    function walk(dir) {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (e) { throw new Error(`无法扫描同步源目录 ${dir}: ${e.message}`); }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+          const relative = toManifestPath(source.prefix, path.relative(source.path, full));
+          files.push({ source: full, relative, stat: fs.statSync(full) });
         }
       }
-      walk(srcRoot);
-      for (const f of files) {
+    }
+    walk(source.path);
+  }
+  files.sort((a, b) => a.relative.localeCompare(b.relative));
+  return files;
+}
+
+function writeDurableExclusive(filePath, content) {
+  const fd = fs.openSync(filePath, 'wx');
+  try {
+    fs.writeFileSync(fd, content);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function storeFileAsChunks(filePath, objectRoot, maxBytes) {
+  const fd = fs.openSync(filePath, 'r');
+  const fileHash = crypto.createHash('sha256');
+  const chunks = [];
+  let bytesStored = 0;
+  let newChunks = 0;
+  let totalBytes = 0;
+  try {
+    const buffer = Buffer.allocUnsafe(SYNC_CHUNK_SIZE);
+    let bytesRead;
+    do {
+      const remaining = Math.max(0, maxBytes - totalBytes);
+      if (!remaining) break;
+      bytesRead = fs.readSync(fd, buffer, 0, Math.min(buffer.length, remaining), null);
+      if (!bytesRead) break;
+      totalBytes += bytesRead;
+      const content = Buffer.from(buffer.subarray(0, bytesRead));
+      fileHash.update(content);
+      const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+      const objectPath = path.join(objectRoot, sha256.slice(0, 2), sha256);
+      if (!fs.existsSync(objectPath)) {
+        fs.mkdirSync(path.dirname(objectPath), { recursive: true });
+        const tempPath = `${objectPath}.part-${process.pid}-${crypto.randomUUID()}`;
+        writeDurableExclusive(tempPath, content);
         try {
-          const stat = fs.statSync(f);
-          if (stat.mtimeMs > refMtime) {
-            const rel = path.relative(srcRoot, f);
-            const destFile = path.join(destRoot, rel);
-            fs.mkdirSync(path.dirname(destFile), { recursive: true });
-            fs.copyFileSync(f, destFile);
-            totalCopied++;
-            if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
-          }
-        } catch (e) { /* 跳过 */ }
-      }
-    }
-
-    copyNewer(claudeSrc, path.join(backupDir, 'claude-sessions'));
-    copyNewer(codexSrc, path.join(backupDir, 'codex-sessions'));
-
-    const metaFile = path.join(store.CC_MANAGER_DIR, 'meta.json');
-    if (fs.existsSync(metaFile)) {
-      try {
-        const stat = fs.statSync(metaFile);
-        if (stat.mtimeMs > refMtime) {
-          fs.copyFileSync(metaFile, path.join(backupDir, 'cc-manager-meta.json'));
-          totalCopied++;
-          if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
-        }
-      } catch (e) { /* 元数据不可读时保留会话备份结果 */ }
-    }
-
-    if (maxMtime > 0) {
-      // 写入 .diff-ref 元数据
-      const refInfo = { createdAt: timestamp, isDiff: true };
-      if (refDir && path.basename(refDir) === refDir) {
-        const previousDir = path.resolve(baseDir, refDir);
-        if (isPathInside(path.resolve(baseDir), previousDir) && isBackupDirectory(previousDir)) {
-          refInfo.refDir = refDir;
-          refInfo.refMtime = refMtime;
+          fs.renameSync(tempPath, objectPath);
+          bytesStored += bytesRead;
+          newChunks++;
+        } catch (e) {
+          if (!fs.existsSync(objectPath)) throw e;
+          const collisionDir = path.join(path.dirname(objectRoot), 'trash', 'object-collisions');
+          fs.mkdirSync(collisionDir, { recursive: true });
+          fs.renameSync(tempPath, path.join(collisionDir, path.basename(tempPath)));
         }
       }
-      fs.writeFileSync(path.join(backupDir, '.diff-ref'), JSON.stringify(refInfo, null, 2), 'utf-8');
+      chunks.push({ sha256, size: bytesRead });
+    } while (bytesRead > 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { sha256: fileHash.digest('hex'), chunks, size: totalBytes, bytesStored, newChunks };
+}
 
-      return { ok: true, message: `增量备份 ${totalCopied} 个文件到 ${backupDir}`, dir: backupDir, maxMtime };
+function sameFileState(a, b) {
+  return !!a && !!b && a.size === b.size && a.sha256 === b.sha256;
+}
+
+function defaultSyncSources() {
+  return [
+    { prefix: 'claude-sessions', path: path.join(os.homedir(), '.claude', 'projects') },
+    { prefix: 'codex-sessions', path: path.join(os.homedir(), '.codex', 'sessions') },
+    { prefix: 'cc-manager-meta.json', path: path.join(store.CC_MANAGER_DIR, 'meta.json'), file: true }
+  ];
+}
+
+// 定时本地备份使用内容寻址快照：完整清单 + 仅新增的数据块 + 删除回收站记录。
+function createSyncSnapshot({ baseDir, timestamp, previousName, sourceRoots = defaultSyncSources() }) {
+  const root = path.resolve(baseDir);
+  const repoDir = path.join(root, SYNC_REPO_DIR);
+  const objectRoot = path.join(repoDir, 'objects');
+  fs.mkdirSync(objectRoot, { recursive: true });
+
+  const previous = findPreviousSyncSnapshot(root, previousName);
+  const previousFiles = previous ? previous.manifest.files : {};
+  for (const source of sourceRoots) {
+    if (!source.file && source.path && !fs.existsSync(source.path) &&
+        Object.keys(previousFiles).some(relative => relative.startsWith(source.prefix + '/'))) {
+      throw new Error(`同步源目录缺失，拒绝把整类会话移入回收站: ${source.path}`);
     }
-    try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch (e) {}
-    return { ok: true, message: '无变更，跳过', skipped: true, maxMtime: refMtime };
+  }
+  const currentFiles = {};
+  let bytesStored = 0;
+  let newChunks = 0;
+  let changedFiles = 0;
+  let reusedFiles = 0;
+
+  for (const file of collectSyncSourceFiles(sourceRoots)) {
+    const stored = storeFileAsChunks(file.source, objectRoot, file.stat.size);
+    const entry = {
+      size: stored.size,
+      mtimeMs: Math.trunc(file.stat.mtimeMs),
+      sha256: stored.sha256,
+      chunks: stored.chunks
+    };
+    currentFiles[file.relative] = entry;
+    bytesStored += stored.bytesStored;
+    newChunks += stored.newChunks;
+    if (sameFileState(previousFiles[file.relative], entry)) reusedFiles++;
+    else changedFiles++;
+  }
+
+  const deleted = Object.keys(previousFiles)
+    .filter(relative => !currentFiles[relative])
+    .sort()
+    .map(relative => ({
+      path: relative,
+      deletedAt: new Date().toISOString(),
+      previousSnapshot: previous.manifest.snapshotId,
+      previousSha256: previousFiles[relative].sha256
+    }));
+
+  if (previous && changedFiles === 0 && deleted.length === 0) {
+    return {
+      ok: true, skipped: true, message: '无内容变更，跳过',
+      dir: previous.dir, snapshotName: path.basename(previous.dir), bytesStored, newChunks,
+      changedFiles: 0, reusedFiles, deletedFiles: 0
+    };
+  }
+
+  const snapshotName = `auto-${timestamp}`;
+  const finalDir = path.join(root, snapshotName);
+  if (fs.existsSync(finalDir)) throw new Error(`同步快照已存在: ${snapshotName}`);
+  const stagingRoot = path.join(repoDir, 'staging');
+  const stagingDir = path.join(stagingRoot, `${snapshotName}-${crypto.randomUUID()}`);
+  fs.mkdirSync(stagingDir, { recursive: true });
+  const manifest = {
+    format: SYNC_FORMAT,
+    snapshotId: snapshotName,
+    createdAt: new Date().toISOString(),
+    parentSnapshot: previous ? previous.manifest.snapshotId : null,
+    chunkSize: SYNC_CHUNK_SIZE,
+    files: currentFiles,
+    deleted,
+    stats: {
+      files: Object.keys(currentFiles).length,
+      changedFiles,
+      reusedFiles,
+      deletedFiles: deleted.length,
+      newChunks,
+      bytesStored
+    }
+  };
+  writeDurableExclusive(path.join(stagingDir, SYNC_MANIFEST), JSON.stringify(manifest, null, 2));
+  fs.renameSync(stagingDir, finalDir);
+  return {
+    ok: true,
+    message: `同步快照：${changedFiles} 个变化，${deleted.length} 个移入回收站，新增 ${newChunks} 个数据块（${bytesStored} 字节）`,
+    dir: finalDir, snapshotName, bytesStored, newChunks, changedFiles,
+    reusedFiles, deletedFiles: deleted.length
+  };
+}
+
+async function doSyncBackup(config, timestamp) {
+  const baseDir = config.localBackupDir || defaultLocalBackupDir();
+  try {
+    return createSyncSnapshot({ baseDir, timestamp, previousName: config.lastAutoBackupDir || '' });
   } catch (e) {
-    return { ok: false, error: '增量备份失败: ' + e.message };
+    return { ok: false, error: '同步备份失败: ' + e.message };
   }
 }
 
@@ -408,7 +592,7 @@ async function runBackup(isAuto) {
   const config = store.getConfig();
   const timestamp = new Date().toISOString().replace(/[T:.Z]/g, '-').replace(/-+$/, '');
   let results = [];
-  let newMaxMtime = 0;
+  let newAutoSnapshot = '';
   let snapshotReady = false;
 
   function ensureSnapshot() {
@@ -436,11 +620,9 @@ async function runBackup(isAuto) {
       }
     } else if (t === 'local') {
       if (isAuto) {
-        const ref = config.autoBackupMtime || 0;
-        const refDir = config.lastAutoBackupDir || '';
-        const r = await doDiffBackup(config, timestamp, ref, refDir);
+        const r = await doSyncBackup(config, timestamp);
         results.push({ target: 'local', ...r });
-        if (r.maxMtime > newMaxMtime) newMaxMtime = r.maxMtime;
+        if (r.ok && !r.skipped && r.snapshotName) newAutoSnapshot = r.snapshotName;
       } else {
         ensureSnapshot();
         results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
@@ -448,9 +630,9 @@ async function runBackup(isAuto) {
     }
   }
 
-  // 更新 autoBackupMtime（自动备份的 diff 基准）和 lastAutoBackupDir
-  if (isAuto && newMaxMtime > 0) {
-    store.updateConfig({ autoBackupMtime: newMaxMtime, lastAutoBackupDir: `auto-${timestamp}` });
+  // 只有快照完成原子发布后，才推进同步仓库的父快照指针。
+  if (isAuto && newAutoSnapshot) {
+    store.updateConfig({ lastAutoBackupDir: newAutoSnapshot });
   }
 
   // 只要本轮实际构建过 workspace，就把快照记录进本地 git 历史。
@@ -677,6 +859,151 @@ function copyWithMode(srcDir, destDir, mode, fullArchiveDir) {
   }
 }
 
+function syncObjectPath(snapshotDir, sha256) {
+  return path.join(path.dirname(snapshotDir), SYNC_REPO_DIR, 'objects', sha256.slice(0, 2), sha256);
+}
+
+function verifySyncObjects(snapshotDir, manifest, prefixes) {
+  const verified = new Map();
+  for (const [relative, entry] of Object.entries(manifest.files)) {
+    if (!prefixes.some(prefix => relative.startsWith(prefix + '/'))) continue;
+    for (const chunk of entry.chunks) {
+      if (verified.has(chunk.sha256)) {
+        if (verified.get(chunk.sha256) !== chunk.size) throw new Error(`同步快照数据块大小冲突: ${chunk.sha256.slice(0, 12)}`);
+        continue;
+      }
+      const objectPath = syncObjectPath(snapshotDir, chunk.sha256);
+      let content;
+      try { content = fs.readFileSync(objectPath); }
+      catch (e) { throw new Error(`同步快照缺少数据块 ${chunk.sha256.slice(0, 12)}: ${e.message}`); }
+      if (content.length !== chunk.size || crypto.createHash('sha256').update(content).digest('hex') !== chunk.sha256) {
+        throw new Error(`同步快照数据块校验失败: ${chunk.sha256.slice(0, 12)}`);
+      }
+      verified.set(chunk.sha256, chunk.size);
+    }
+  }
+}
+
+function moveAside(existingPath, archivePath) {
+  fs.mkdirSync(path.dirname(archivePath), { recursive: true });
+  let target = archivePath;
+  if (fs.existsSync(target)) target += `-${crypto.randomUUID()}`;
+  fs.renameSync(existingPath, target);
+  return target;
+}
+
+function writeSyncFile(snapshotDir, entry, destFile, archiveFile, failureDir) {
+  fs.mkdirSync(path.dirname(destFile), { recursive: true });
+  const tempFile = `${destFile}.restore-${crypto.randomUUID()}.part`;
+  let fd;
+  try {
+    fd = fs.openSync(tempFile, 'wx');
+    const fileHash = crypto.createHash('sha256');
+    for (const chunk of entry.chunks) {
+      const content = fs.readFileSync(syncObjectPath(snapshotDir, chunk.sha256));
+      fileHash.update(content);
+      fs.writeSync(fd, content);
+    }
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    if (fileHash.digest('hex') !== entry.sha256) throw new Error(`恢复文件校验失败: ${destFile}`);
+
+    let archived = null;
+    if (fs.existsSync(destFile)) archived = moveAside(destFile, archiveFile);
+    try {
+      fs.renameSync(tempFile, destFile);
+    } catch (e) {
+      if (archived && !fs.existsSync(destFile)) fs.renameSync(archived, destFile);
+      throw e;
+    }
+  } catch (e) {
+    if (fd !== undefined && fd !== null) {
+      try { fs.closeSync(fd); } catch (closeError) { /* 保留原始错误 */ }
+    }
+    if (fs.existsSync(tempFile)) {
+      fs.mkdirSync(failureDir, { recursive: true });
+      fs.renameSync(tempFile, path.join(failureDir, path.basename(tempFile)));
+    }
+    throw e;
+  }
+}
+
+function applySyncSnapshot(snapshotDir, manifest, cli, mode, safeDir, targetRoots) {
+  const available = ['claude', 'codex'].filter(name =>
+    Object.keys(manifest.files).some(relative => relative.startsWith(`${name}-sessions/`)));
+  const selected = cli ? [cli] : available;
+  if (!selected.length) throw new Error('该同步快照不包含可恢复的会话');
+  const prefixes = selected.map(name => `${name}-sessions`);
+  for (const prefix of prefixes) {
+    if (!Object.keys(manifest.files).some(relative => relative.startsWith(prefix + '/'))) {
+      throw new Error(`该同步快照不包含 ${prefix === 'claude-sessions' ? 'Claude' : 'Codex'} 会话`);
+    }
+  }
+  verifySyncObjects(snapshotDir, manifest, prefixes);
+
+  const completedFull = [];
+  try {
+    for (const name of selected) {
+      const prefix = `${name}-sessions`;
+      const destRoot = targetRoots[name];
+      const entries = Object.entries(manifest.files)
+        .filter(([relative]) => relative.startsWith(prefix + '/'))
+        .sort(([a], [b]) => a.localeCompare(b));
+      let originalRoot = null;
+      if (mode === 'full') {
+        originalRoot = path.join(safeDir, `original-${prefix}`);
+        if (fs.existsSync(destRoot)) moveAside(destRoot, originalRoot);
+        fs.mkdirSync(destRoot, { recursive: true });
+      }
+      const state = { name, destRoot, originalRoot };
+      if (mode === 'full') completedFull.push(state);
+
+      for (const [relative, entry] of entries) {
+        const suffix = relative.slice(prefix.length + 1).split('/');
+        const destFile = path.join(destRoot, ...suffix);
+        if (mode === 'incremental' && fs.existsSync(destFile)) continue;
+        const archiveFile = path.join(safeDir, 'overwritten-by-restore', prefix, ...suffix);
+        const failureDir = path.join(safeDir, 'failed-restore-files', prefix);
+        writeSyncFile(snapshotDir, entry, destFile, archiveFile, failureDir);
+      }
+    }
+  } catch (e) {
+    if (mode === 'full') {
+      for (const state of completedFull.reverse()) {
+        if (fs.existsSync(state.destRoot)) {
+          moveAside(state.destRoot, path.join(safeDir, `failed-${state.name}-restore`));
+        }
+        if (state.originalRoot && fs.existsSync(state.originalRoot)) {
+          fs.renameSync(state.originalRoot, state.destRoot);
+        }
+      }
+    }
+    throw e;
+  }
+}
+
+async function runRestoreFromSyncSnapshot(snapshotDir, manifest, cli, mode) {
+  let safetyBackup = null;
+  try {
+    const safety = createSafetyBackup();
+    safetyBackup = safety.safeDir;
+    applySyncSnapshot(snapshotDir, manifest, cli, mode, safety.safeDir, {
+      claude: safety.claudeSrc,
+      codex: safety.codexSrc
+    });
+    store.updateConfig({ lastRestoreAt: Date.now() });
+    const deletedCount = (manifest.deleted || []).length;
+    return {
+      ok: true,
+      message: `已从 ${path.basename(snapshotDir)} ${mode}恢复（清单快照，含 ${deletedCount} 条回收站记录），恢复前已备份到 ${safety.safeDir}`,
+      safetyBackup: safety.safeDir
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, ...(safetyBackup ? { safetyBackup } : {}) };
+  }
+}
+
 // 从本地备份目录恢复
 function restoreFromLocalBackup(backupPath, cli, mode) {
   return runExclusiveOperation('恢复', () => runRestoreFromLocalBackup(backupPath, cli, mode));
@@ -688,6 +1015,15 @@ async function runRestoreFromLocalBackup(backupPath, cli, mode) {
   catch (e) { return { ok: false, error: e.message }; }
   backupPath = resolveAllowedLocalBackup(backupPath);
   if (!backupPath) return { ok: false, error: '本地备份路径无效或不在允许的备份目录中' };
+
+  if (fs.existsSync(path.join(backupPath, SYNC_MANIFEST))) {
+    try {
+      const manifest = readSyncManifest(backupPath);
+      return await runRestoreFromSyncSnapshot(backupPath, manifest, cli, mode);
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
 
   const chain = [];
   // 构建链：从当前备份一路向上回溯到全量基准
@@ -771,5 +1107,11 @@ module.exports = {
   webdavTestConnection,
   selectBackupTargets,
   copyWithMode,
-  wipeWorkspace
+  wipeWorkspace,
+  createSyncSnapshot,
+  readSyncManifest,
+  applySyncSnapshot,
+  SYNC_FORMAT,
+  SYNC_MANIFEST,
+  SYNC_CHUNK_SIZE
 };

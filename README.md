@@ -76,7 +76,7 @@ cc-manager help                   显示帮助
 | 内部 Git 工作区 | `~/.cc-manager/backup-workspace/` |
 | 元数据与配置 | `~/.cc-manager/meta.json`、`config.json` |
 
-自动备份与手动备份并不完全相同：本地自动备份采用基于修改时间的 diff 链；手动本地备份、Git 和 WebDAV 使用完整工作区快照。详见[用户指南的备份章节](./docs/USER_GUIDE.md#备份)。
+自动备份与手动备份并不完全相同：本地自动备份使用内容寻址同步仓库，按 4 MiB 数据块去重，并用完整清单和回收站记录表达删除；手动本地备份、Git 和 WebDAV 使用完整工作区快照。旧 `.diff-ref` 备份仍可恢复。详见[用户指南的备份章节](./docs/USER_GUIDE.md#备份)。
 
 ## 安全边界
 

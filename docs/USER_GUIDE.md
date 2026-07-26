@@ -113,7 +113,7 @@ Fork 会读取原始 JSONL 行、生成新的 UUID，并在源文件同目录创
 
 | 目标 | 行为 | 凭据 |
 |---|---|---|
-| `local` | 复制到本地备份目录 | 无 |
+| `local` | 手动时复制完整目录；定时任务写内容寻址同步快照 | 无 |
 | `github` | 在内部 Git 工作区提交，并在可用时推送 | `CC_MANAGER_GH_TOKEN` |
 | `webdav` | 逐文件 HTTP PUT，跳过 `.git` | `CC_MANAGER_WEBDAV_PASS` |
 | `all` | GitHub、WebDAV、本地依次执行 | 对应凭据 |
@@ -135,16 +135,20 @@ WebDAV 密码不保存到 `config.json`。先保存 URL/用户名，再点击连
 
 - 顶栏“一键备份”和 `cc-manager backup` 是手动备份；它们先重建完整工作区快照。
 - 自动备份周期默认 1440 分钟，设为 0 可关闭；UI 允许 0–1440。
-- 当自动任务包含 `local` 时，本地目标使用基于文件 `mtime` 的 diff 目录 `auto-<时间>`，并用 `.diff-ref` 指向上一层。
-- 自动 Git/WebDAV 目标使用刷新后的完整工作区，而不是本地 diff 目录。
+- 当自动任务包含 `local` 时，本地目标会扫描当前会话，将文件切成固定 4 MiB 块，以 SHA-256 为地址写入 `.cc-manager-sync/objects/`；已经存在的数据块不会重复写入。
+- 每个 `auto-<时间>/.sync-manifest.json` 都是该时刻的完整文件清单。新增和修改由新块表达，源端消失的路径写入 `deleted` 回收站记录；旧内容块和旧快照不删除。
+- 清单发布使用同一备份根目录内的 staging 目录和原子重命名；内容没有变化时不发布空快照。
+- 自动 Git/WebDAV 目标仍使用刷新后的完整工作区，而不是本地内容寻址仓库。
 - 备份和恢复在同一个进程内互斥；已有操作运行时，新操作会返回“请稍后重试”。
+
+这种机制类似精简的现代快照备份仓库：读取当前仓库状态、复用目标仓库已有对象、提交一份新清单。它不会只依赖 `mtime` 判断内容，活跃大对话追加少量内容时通常只增加尾部块，而不是再次保存整个文件。固定分块对“中间插入”不如内容定义分块高效，但会话 JSONL 的主要写入模式是末尾追加。
 
 ### 备份历史
 
 恢复窗口合并两个来源并按时间倒序分页：
 
 - 内部 Git 工作区的 commit；
-- 默认和自定义本地备份根目录下，名称可解析为时间且包含会话目录或 `.diff-ref` 的文件夹。
+- 默认和自定义本地备份根目录下，名称可解析为时间且包含会话目录、`.diff-ref` 或 `.sync-manifest.json` 的文件夹。
 
 每页默认 20 条。`pre-restore-*` 和 `auto-*` 也会进入历史。
 
@@ -160,9 +164,9 @@ WebDAV 密码不保存到 `config.json`。先保存 URL/用户名，再点击连
 |---|---|---|---|
 | `incremental` | 保留当前版本 | 保留 | 只补回缺失会话，最保守 |
 | `merge` | 用备份覆盖 | 保留 | 回到备份内容，同时保留后来新增会话 |
-| `full` | 用备份覆盖 | 从活动目录移走 | 让活动目录严格按备份链重建 |
+| `full` | 用备份覆盖 | 从活动目录移走 | 让活动目录严格等于所选快照 |
 
-`full` 不直接删除旧活动目录，而是把它移动到安全快照中的 `original-claude-sessions` / `original-codex-sessions`。本地 diff 备份会从基准层开始逐层叠加。
+`full` 不直接删除旧活动目录，而是把它移动到安全快照中的 `original-claude-sessions` / `original-codex-sessions`。同步快照恢复前会校验所有所需对象，逐文件用临时文件原子发布；失败的完整恢复会把半成品移入安全目录并尽量自动回滚。清单中已经移入回收站的路径不会在 `full` 恢复后复活。旧 `.diff-ref` 备份仍按基准层到最新层叠加恢复。
 
 WebDAV 当前只支持上传，不支持在 UI 中列历史或恢复。
 
@@ -179,8 +183,8 @@ WebDAV 当前只支持上传，不支持在 UI 中列历史或恢复。
 | `webdavUrl` | `""` | WebDAV 根 URL |
 | `webdavUsername` | `""` | WebDAV 用户名 |
 | `localBackupDir` | `""` | 空值使用默认目录 |
-| `autoBackupMtime` | `0` | 内部自动 diff 基准，不应手改 |
-| `lastAutoBackupDir` | `""` | 内部 diff 链指针，不应手改 |
+| `autoBackupMtime` | `0` | 旧 diff 格式遗留字段；新同步快照忽略，不应手改 |
+| `lastAutoBackupDir` | `""` | 最近成功发布的自动同步快照名；也兼容旧 diff 链指针 |
 | `lastBackupAt` | `null` | 最近至少一个目标成功的时间 |
 | `lastRestoreAt` | `null` | 最近恢复成功的时间 |
 
@@ -198,4 +202,4 @@ WebDAV 当前只支持上传，不支持在 UI 中列历史或恢复。
 - **WebDAV 测试仍使用旧地址**：先保存设置，再测试。
 - **CLI 打不开**：确认 `where claude` / `where codex` 有结果并重启服务。
 - **编辑返回请求过大**：会话原始 JSON 超过 10 MB；当前需使用 Fork 或外部工具处理。
-- **恢复记录缺失**：确认目录名含可解析时间，并且含 `claude-sessions`、`codex-sessions` 或 `.diff-ref`。
+- **恢复记录缺失**：确认目录名含可解析时间，并且含 `claude-sessions`、`codex-sessions`、`.diff-ref` 或 `.sync-manifest.json`。

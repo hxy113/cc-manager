@@ -318,7 +318,7 @@ Claude 项目对象当前可能不含 `cli` 字段；Codex 项目含 `cli: "code
 
 ### `GET /api/backup/history?page=1&pageSize=20`
 
-`pageSize` 在路由层限制为 1–100。返回 Git 与本地历史合并后的分页对象：
+`pageSize` 在路由层限制为 1–100。返回 Git 与本地历史合并后的分页对象；本地项包括完整目录、旧 `.diff-ref` 链和新 `.sync-manifest.json` 同步快照：
 
 ```json
 {
@@ -375,4 +375,4 @@ Git 来源：
 }
 ```
 
-参数格式错误返回 400；备份缺失、路径越界、工作区错误等运行时失败返回 HTTP 200 + `{ "ok": false, "error": "..." }`。
+参数格式错误返回 400；备份缺失、路径越界、工作区错误、同步对象缺失或校验失败等运行时失败返回 HTTP 200 + `{ "ok": false, "error": "..." }`。同步快照会在改动活动目录前校验所需数据块；`full` 恢复按完整清单重建，因此 tombstone 对应的旧文件不会复活。

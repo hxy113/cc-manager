@@ -303,6 +303,151 @@ test('copyWithMode full: 完整替换并归档旧目录', () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+function makeSyncFixture(label) {
+  const tmp = path.join(os.tmpdir(), `cc-sync-${label}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const baseDir = path.join(tmp, 'backups');
+  const claude = path.join(tmp, 'source-claude');
+  const codex = path.join(tmp, 'source-codex');
+  const meta = path.join(tmp, 'meta.json');
+  fs.mkdirSync(claude, { recursive: true });
+  fs.mkdirSync(codex, { recursive: true });
+  fs.writeFileSync(meta, '{}');
+  return {
+    tmp, baseDir, claude, codex, meta,
+    sourceRoots: [
+      { prefix: 'claude-sessions', path: claude },
+      { prefix: 'codex-sessions', path: codex },
+      { prefix: 'cc-manager-meta.json', path: meta, file: true }
+    ]
+  };
+}
+
+test('同步快照: 内容寻址分块去重，追加大文件只新增尾部块', () => {
+  const f = makeSyncFixture('chunks');
+  try {
+    const active = path.join(f.claude, 'active.jsonl');
+    fs.writeFileSync(active, Buffer.concat([Buffer.alloc(backup.SYNC_CHUNK_SIZE, 65), Buffer.from('tail')]));
+    fs.writeFileSync(path.join(f.codex, 'same.jsonl'), Buffer.alloc(backup.SYNC_CHUNK_SIZE, 65));
+    const first = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-10-00-00-001', sourceRoots: f.sourceRoots
+    });
+    assert.ok(first.ok && !first.skipped);
+    assert.strictEqual(first.newChunks, 3, '相同的 4 MiB 块应只保存一次，另含 tail 与 meta 块');
+
+    fs.appendFileSync(active, '-appended');
+    const second = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-10-01-00-001',
+      previousName: first.snapshotName, sourceRoots: f.sourceRoots
+    });
+    assert.strictEqual(second.changedFiles, 1);
+    assert.strictEqual(second.newChunks, 1, '追加后完整前缀块应复用，只写新的尾块');
+    assert.ok(second.bytesStored < 1024, '追加少量文本不应再次写入整个大对话');
+
+    const unchanged = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-10-02-00-001',
+      previousName: second.snapshotName, sourceRoots: f.sourceRoots
+    });
+    assert.ok(unchanged.skipped, '内容未变化时不发布空快照');
+  } finally {
+    fs.rmSync(f.tmp, { recursive: true, force: true });
+  }
+});
+
+test('同步快照: 删除产生回收站记录，旧内容对象仍保留且 full 恢复不复活文件', () => {
+  const f = makeSyncFixture('delete');
+  try {
+    fs.writeFileSync(path.join(f.claude, 'keep.jsonl'), 'KEEP');
+    fs.writeFileSync(path.join(f.claude, 'deleted.jsonl'), 'NEVER-DELETE-CONTENT');
+    fs.writeFileSync(path.join(f.codex, 'rollout.jsonl'), 'CODEX');
+    const first = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-11-00-00-001', sourceRoots: f.sourceRoots
+    });
+    const firstManifest = backup.readSyncManifest(first.dir);
+    const deletedEntry = firstManifest.files['claude-sessions/deleted.jsonl'];
+    const oldObject = path.join(f.baseDir, '.cc-manager-sync', 'objects',
+      deletedEntry.chunks[0].sha256.slice(0, 2), deletedEntry.chunks[0].sha256);
+    fs.unlinkSync(path.join(f.claude, 'deleted.jsonl'));
+
+    const second = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-11-01-00-001',
+      previousName: first.snapshotName, sourceRoots: f.sourceRoots
+    });
+    const manifest = backup.readSyncManifest(second.dir);
+    assert.strictEqual(second.changedFiles, 0, '纯删除不应伪装成文件修改');
+    assert.strictEqual(second.deletedFiles, 1);
+    assert.strictEqual(manifest.deleted[0].path, 'claude-sessions/deleted.jsonl');
+    assert.ok(fs.existsSync(oldObject), '删除只改变活动清单，旧内容块必须永久保留');
+
+    const targetClaude = path.join(f.tmp, 'target-claude');
+    const targetCodex = path.join(f.tmp, 'target-codex');
+    const safety = path.join(f.tmp, 'safety');
+    fs.mkdirSync(targetClaude, { recursive: true });
+    fs.mkdirSync(targetCodex, { recursive: true });
+    fs.writeFileSync(path.join(targetClaude, 'deleted.jsonl'), 'CURRENT-OLD');
+    fs.writeFileSync(path.join(targetClaude, 'stale.jsonl'), 'STALE');
+    backup.applySyncSnapshot(second.dir, manifest, null, 'full', safety, {
+      claude: targetClaude, codex: targetCodex
+    });
+    assert.strictEqual(fs.readFileSync(path.join(targetClaude, 'keep.jsonl'), 'utf-8'), 'KEEP');
+    assert.ok(!fs.existsSync(path.join(targetClaude, 'deleted.jsonl')), 'full 恢复应遵循删除后的活动视图');
+    assert.ok(!fs.existsSync(path.join(targetClaude, 'stale.jsonl')));
+    assert.strictEqual(fs.readFileSync(path.join(safety, 'original-claude-sessions', 'deleted.jsonl'), 'utf-8'), 'CURRENT-OLD');
+  } finally {
+    fs.rmSync(f.tmp, { recursive: true, force: true });
+  }
+});
+
+test('同步快照: 清单拒绝路径穿越，损坏对象在改动目标前阻止恢复', () => {
+  const f = makeSyncFixture('integrity');
+  try {
+    fs.writeFileSync(path.join(f.claude, 'safe.jsonl'), 'SAFE');
+    fs.writeFileSync(path.join(f.codex, 'rollout.jsonl'), 'CODEX');
+    const snapshot = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-12-00-00-001', sourceRoots: f.sourceRoots
+    });
+    const manifestPath = path.join(snapshot.dir, backup.SYNC_MANIFEST);
+    const valid = backup.readSyncManifest(snapshot.dir);
+    const unsafe = JSON.parse(JSON.stringify(valid));
+    unsafe.files['claude-sessions/../../escape.jsonl'] = unsafe.files['claude-sessions/safe.jsonl'];
+    fs.writeFileSync(manifestPath, JSON.stringify(unsafe));
+    assert.throws(() => backup.readSyncManifest(snapshot.dir), /路径|记录/);
+    fs.writeFileSync(manifestPath, JSON.stringify(valid));
+
+    const entry = valid.files['claude-sessions/safe.jsonl'];
+    const objectPath = path.join(f.baseDir, '.cc-manager-sync', 'objects',
+      entry.chunks[0].sha256.slice(0, 2), entry.chunks[0].sha256);
+    fs.writeFileSync(objectPath, 'CORRUPT');
+    const target = path.join(f.tmp, 'target');
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'untouched.jsonl'), 'UNTOUCHED');
+    assert.throws(() => backup.applySyncSnapshot(snapshot.dir, valid, 'claude', 'full',
+      path.join(f.tmp, 'safety'), { claude: target, codex: path.join(f.tmp, 'unused') }), /校验失败/);
+    assert.strictEqual(fs.readFileSync(path.join(target, 'untouched.jsonl'), 'utf-8'), 'UNTOUCHED');
+  } finally {
+    fs.rmSync(f.tmp, { recursive: true, force: true });
+  }
+});
+
+test('同步快照: 父快照已有数据时拒绝把缺失的整个源目录误判为批量删除', () => {
+  const f = makeSyncFixture('missing-root');
+  try {
+    fs.writeFileSync(path.join(f.claude, 'important.jsonl'), 'IMPORTANT');
+    fs.writeFileSync(path.join(f.codex, 'rollout.jsonl'), 'CODEX');
+    const first = backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-13-00-00-001', sourceRoots: f.sourceRoots
+    });
+    fs.renameSync(f.claude, path.join(f.tmp, 'claude-temporarily-unavailable'));
+    assert.throws(() => backup.createSyncSnapshot({
+      baseDir: f.baseDir, timestamp: '2026-07-26-13-01-00-001',
+      previousName: first.snapshotName, sourceRoots: f.sourceRoots
+    }), /源目录缺失/);
+    assert.ok(!fs.existsSync(path.join(f.baseDir, 'auto-2026-07-26-13-01-00-001')),
+      '源目录异常时不得发布误删除快照');
+  } finally {
+    fs.rmSync(f.tmp, { recursive: true, force: true });
+  }
+});
+
 test('claude.resolveProjectDir: 拒绝路径穿越', () => {
   assert.strictEqual(claude.resolveProjectDir('..'), null);
   assert.strictEqual(claude.resolveProjectDir('..\\outside'), null);
