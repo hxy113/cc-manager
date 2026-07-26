@@ -494,6 +494,8 @@ test('前端会话操作不把动态 ID 拼入内联 JavaScript', () => {
   assert.ok(!html.includes("deleteSession('${s.id}')"));
   assert.ok(html.includes("$('#setting-branch').value = s.branch || 'main'"));
   assert.ok(html.includes("$('#setting-webdav-user').value = s.webdavUsername || ''"));
+  assert.ok(!html.includes("forEach(id=>$(id).style"), '批量 DOM ID 不能作为裸标签选择器传给 $()');
+  assert.ok(html.includes("forEach(id=>$(`#${id}`).style"), '编辑模式应使用 #id 选择顶部按钮');
 });
 
 // --- bug2: claude.writeFork 写新文件 + sessionId 替换 + 源文件不动 ---

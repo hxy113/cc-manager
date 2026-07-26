@@ -1214,7 +1214,7 @@ async function enterEditMode(sessionId) {
     editor.entries = []; editor.selected.clear(); editor.clipboard = []; editor.eidSeq = 1;
     editor.origLines.forEach(line => {if (isMsgLine(state.cli, line)) editor.entries.push({eid:editor.eidSeq++, line, role:msgRoleOf(state.cli,line), inserted:false});});
     editor.active = true;
-    ['btn-edit','btn-export','btn-delete','btn-open'].forEach(id=>$(id).style.display='none');
+    ['btn-edit','btn-export','btn-delete','btn-open'].forEach(id=>$(`#${id}`).style.display='none');
     $('#preview-nav-btn').style.display='none'; $('#preview-nav').classList.remove('open');
     renderEditor();
   } catch(e) { showToast('加载失败: '+e.message, 'error'); }
