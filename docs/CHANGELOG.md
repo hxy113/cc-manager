@@ -41,6 +41,7 @@
 - 移除未使用的 `cors`，并清理锁文件中遗留的 `chokidar`/`readdirp`。
 - 新增 GitHub Actions CI（Windows/Linux × Node 18/22）、Dependabot、CODEOWNERS、Issue/PR 模板、贡献指南与安全策略。
 - 新增 `.editorconfig`、`.gitattributes` 和敏感/生成文件忽略规则，统一 LF 并降低凭据误提交风险。
+- 主分支首轮 CI 全部通过；Dependabot 验证出 Express 5 不兼容，自动版本更新策略改为忽略 Express semver-major，待专门迁移。
 
 ## 2026-07-17 Phase 3：完整版修改会话（copy-on-write）
 

@@ -128,7 +128,7 @@ node test/raw-edit-probe.js
 ## GitHub 工程约定
 
 - `.github/workflows/ci.yml` 在 Windows/Linux、Node 18/22 上运行 `npm ci` 与 `npm test`。
-- Dependabot 每月检查 npm 与 GitHub Actions 依赖。
+- Dependabot 每月检查 npm 与 GitHub Actions 依赖；Express 大版本升级需要单独迁移和验证，因此自动版本 PR 忽略 semver-major，安全更新不受该规则影响。
 - PR 必须填写验证、文档、安全与风险清单；会话数据不得作为公开测试附件。
 - `CODEOWNERS` 当前由 `@hxy113` 负责全部路径。
 - `SECURITY.md` 规定漏洞优先私密报告；公开 issue 不得包含会话、凭据或私有源码。
