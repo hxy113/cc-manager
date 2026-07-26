@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible cc-manager problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach raw session files until you have removed credentials, private paths, source code, and personal conversation content.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cli
+    attributes:
+      label: Affected CLI
+      options:
+        - Claude Code
+        - Codex CLI
+        - Backup / restore
+        - Web UI / other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, Node.js version, and browser
+      placeholder: Windows 11, Node 22.14.0, Edge 138
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start cc-manager...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+      description: Remove tokens, credentials, private paths, and conversation content.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I searched existing issues and the known limitations document.
+          required: true
+        - label: I removed secrets and private conversation content from this report.
+          required: true

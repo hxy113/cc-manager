@@ -1,4 +1,10 @@
 // 全面端到端验证：所有 API + copy-on-write 安全性 + fork 合法性 + open
+// 该脚本会读取真实会话、创建临时 fork 并执行真实备份，必须显式授权。
+if (process.env.CC_MANAGER_E2E_ALLOW_REAL_DATA !== '1') {
+  console.error('已拒绝运行：请确认理解该脚本会操作真实本地数据，再设置 CC_MANAGER_E2E_ALLOW_REAL_DATA=1');
+  process.exit(2);
+}
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -125,16 +131,20 @@ function fileHash(p) {
   moveToTrash(forkFile);
   ok('已清理 fork 测试文件', !fs.existsSync(forkFile));
 
-  // ========= open 测试（不实际开窗，验证返回） =========
+  // ========= open 测试（只有额外授权时才真正打开终端） =========
   log('\n--- open 测试 ---');
-  const openRes = await jpost(`/api/session/claude/${sess.id}/open`, {projectName: proj.name});
-  ok('POST /open 返回 ok', openRes.ok, openRes.error || '');
-  ok('open 命令含绝对路径', openRes.cliPath && openRes.cmd.includes(openRes.cliPath), openRes.cmd?.slice(0,60));
-  ok('open 命令含 --resume', openRes.cmd && openRes.cmd.includes('--resume'));
-  ok('open cwd 是工程目录', openRes.cwd && openRes.cwd.toLowerCase().includes('claudecode'), openRes.cwd);
+  if (process.env.CC_MANAGER_E2E_ALLOW_OPEN === '1') {
+    const openRes = await jpost(`/api/session/claude/${sess.id}/open`, {projectName: proj.name});
+    ok('POST /open 返回 ok', openRes.ok, openRes.error || '');
+    ok('open 命令含绝对路径', openRes.cliPath && openRes.cmd.includes(openRes.cliPath), openRes.cmd?.slice(0,60));
+    ok('open 命令含 --resume', openRes.cmd && openRes.cmd.includes('--resume'));
+    ok('open cwd 是工程目录', openRes.cwd && openRes.cwd.toLowerCase().includes('claudecode'), openRes.cwd);
+  } else {
+    ok('open 实际启动已跳过（需 CC_MANAGER_E2E_ALLOW_OPEN=1）', true);
+  }
 
   // open 不存在的会话 -> 404
-  const openBad = await jpost(`/api/session/claude/nonexistent-id-12345/open`, {projectName: proj.name});
+  const openBad = await jpost('/api/session/claude/nonexistent-id-12345/open', {projectName: proj.name});
   ok('open 不存在会话被拒绝', !openBad.ok || openBad.error, openBad.error);
 
   // ========= 备份测试 =========

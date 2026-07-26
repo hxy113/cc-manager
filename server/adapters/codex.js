@@ -9,7 +9,13 @@ const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 function parseJsonl(filePath) {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    return content.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const parsed = [];
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue;
+      try { parsed.push(JSON.parse(line)); }
+      catch (e) { /* 活跃会话的末行可能尚未写完，只跳过该行 */ }
+    }
+    return parsed;
   } catch (e) { return []; }
 }
 
@@ -204,8 +210,13 @@ function getSessions(projectName) {
     try {
       const stat = fs.statSync(filePath);
       const fileName = path.basename(filePath, '.jsonl');
-      const uuidMatch = fileName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
-      const sessionId = uuidMatch ? uuidMatch[1] : fileName;
+      const uuidMatch = fileName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      let sessionId = uuidMatch ? uuidMatch[1] : fileName;
+      const sessionMeta = parsed.find(line => line.type === 'session_meta');
+      if (sessionMeta) {
+        const metaId = getPayload(sessionMeta).id;
+        if (typeof metaId === 'string' && metaId) sessionId = metaId;
+      }
 
       const title = extractTitle(parsed);
       const messageCount = countMessages(parsed);
@@ -226,16 +237,32 @@ function getSessions(projectName) {
   return sessions;
 }
 
-function getSessionContent(sessionId) {
+function findSessionFile(sessionId, projectName) {
   const files = scanAllSessionFiles();
   for (const filePath of files) {
-    if (filePath.includes(sessionId)) {
-      const parsed = parseJsonl(filePath);
-      if (!parsed.length) return null;
-      return normalizeContent(parsed);
+    const parsed = parseJsonl(filePath);
+    if (!parsed.length) continue;
+    const cwd = detectCwd(parsed);
+    if (projectName !== undefined) {
+      const expectedCwd = projectName === '(未关联项目)' ? null : projectName;
+      if (cwd !== expectedCwd) continue;
     }
+    const fileName = path.basename(filePath, '.jsonl');
+    const uuidMatch = fileName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    let actualId = uuidMatch ? uuidMatch[1] : fileName;
+    const meta = parsed.find(line => line.type === 'session_meta');
+    if (meta) {
+      const metaId = getPayload(meta).id;
+      if (typeof metaId === 'string' && metaId) actualId = metaId;
+    }
+    if (actualId === sessionId) return { filePath, parsed };
   }
   return null;
+}
+
+function getSessionContent(sessionId, projectName) {
+  const found = findSessionFile(sessionId, projectName);
+  return found ? normalizeContent(found.parsed) : null;
 }
 
 // --- 在会话内容中搜索（用于全文搜索）---
@@ -278,21 +305,18 @@ function escapeRegex(str) {
 // --- 读取会话原始行（未 normalize，供 fork / 编辑使用）---
 // 与 getSessionContent 不同：这里返回 parseJsonl 的原始行，保留 response_item / session_meta 等结构
 function getRawLines(sessionId, projectName) {
-  const files = scanAllSessionFiles();
-  for (const filePath of files) {
-    if (filePath.includes(sessionId)) {
-      const parsed = parseJsonl(filePath);
-      if (!parsed.length) return null;
-      return parsed;
-    }
-  }
-  return null;
+  const found = findSessionFile(sessionId, projectName);
+  return found ? found.parsed : null;
 }
 
 // --- 写一个 fork 副本 ---
 // 新文件名 rollout-<YYYY-MM-DDTHH-MM-SS>-<newId>.jsonl（与 codex 命名一致）
 // session_meta.payload.id 替换为 newId，永不覆盖源文件
 function writeFork(rawLines, srcFilePath, newId) {
+  if (!Array.isArray(rawLines)) throw new TypeError('rawLines 必须是数组');
+  if (typeof newId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(newId)) {
+    throw new Error('新会话 ID 不合法');
+  }
   const dir = path.dirname(srcFilePath);
   const ts = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
   const newFilePath = path.join(dir, `rollout-${ts}-${newId}.jsonl`);
@@ -303,14 +327,16 @@ function writeFork(rawLines, srcFilePath, newId) {
     // codex 的会话 id 存在 session_meta.payload.id（payload 可能是对象或字符串）
     if (updated.type === 'session_meta') {
       let p = updated.payload;
-      if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) { p = null; } }
+      const wasString = typeof p === 'string';
+      if (wasString) { try { p = JSON.parse(p); } catch (e) { p = null; } }
       if (p && typeof p === 'object') {
-        updated.payload = { ...p, id: newId };
+        const nextPayload = { ...p, id: newId };
+        updated.payload = wasString ? JSON.stringify(nextPayload) : nextPayload;
       }
     }
     out.push(JSON.stringify(updated));
   }
-  fs.writeFileSync(newFilePath, out.join('\n') + '\n', 'utf-8');
+  fs.writeFileSync(newFilePath, out.join('\n') + '\n', { encoding: 'utf-8', flag: 'wx' });
   return { newFilePath, newId };
 }
 
@@ -321,5 +347,7 @@ module.exports = {
   getSessionContent,
   searchSessionText,
   getRawLines,
-  writeFork
+  writeFork,
+  parseJsonl,
+  findSessionFile
 };

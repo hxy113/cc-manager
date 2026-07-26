@@ -1,8 +1,34 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const store = require('./store');
+
+function copyDirectory(src, dest) {
+  if (!fs.existsSync(src)) return false;
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.cpSync(src, dest, { recursive: true, force: true });
+  return true;
+}
+
+function defaultLocalBackupDir() {
+  return path.join(os.homedir(), 'cc-manager-local-backups');
+}
+
+function getLocalBackupRoots(config = store.getConfig()) {
+  return [...new Set([config.localBackupDir, defaultLocalBackupDir()].filter(Boolean).map(p => path.resolve(p)))];
+}
+
+function isPathInside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function isBackupDirectory(dir) {
+  return fs.existsSync(path.join(dir, 'claude-sessions')) ||
+    fs.existsSync(path.join(dir, 'codex-sessions')) ||
+    fs.existsSync(path.join(dir, '.diff-ref'));
+}
 
 // ========== 构建备份工作区的快照 ==========
 
@@ -41,18 +67,14 @@ function buildBackupSnapshot() {
   const claudeProjects = path.join(os.homedir(), '.claude', 'projects');
   if (fs.existsSync(claudeProjects)) {
     const dest = path.join(store.BACKUP_WORKSPACE, 'claude-sessions');
-    try {
-      execSync(`xcopy "${claudeProjects}" "${dest}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    } catch (e) { /* xcopy 可能失败 */ }
+    copyDirectory(claudeProjects, dest);
   }
 
   // 复制 Codex 会话
   const codexSessions = path.join(os.homedir(), '.codex', 'sessions');
   if (fs.existsSync(codexSessions)) {
     const dest = path.join(store.BACKUP_WORKSPACE, 'codex-sessions');
-    try {
-      execSync(`xcopy "${codexSessions}" "${dest}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    } catch (e) { /* 同上 */ }
+    copyDirectory(codexSessions, dest);
   }
 
   // 复制 cc-manager 自身元数据
@@ -65,11 +87,16 @@ function buildBackupSnapshot() {
 // ========== Git 操作 ==========
 
 function runGit(args, cwd) {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', timeout: 30000 });
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf-8',
+    timeout: 30000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
 }
 
 function gitAvailable() {
-  try { execSync('git --version', { encoding: 'utf-8', timeout: 5000 }); return true; }
+  try { execFileSync('git', ['--version'], { encoding: 'utf-8', timeout: 5000 }); return true; }
   catch (e) { return false; }
 }
 
@@ -92,10 +119,22 @@ function gitInit() {
 // 设置远程仓库
 function gitSetRemote(repoUrl) {
   try {
-    runGit(['remote', 'remove', 'origin'], store.BACKUP_WORKSPACE);
-  } catch (e) { /* 没有 remote 正常 */ }
+    ensureBackupGit();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  if (!repoUrl) {
+    try { runGit(['remote', 'remove', 'origin'], store.BACKUP_WORKSPACE); }
+    catch (e) { /* 没有 remote 正常 */ }
+    return { ok: true };
+  }
   try {
-    runGit(['remote', 'add', 'origin', repoUrl], store.BACKUP_WORKSPACE);
+    let hasOrigin = false;
+    try {
+      runGit(['remote', 'get-url', 'origin'], store.BACKUP_WORKSPACE);
+      hasOrigin = true;
+    } catch (e) { /* 尚未设置 origin */ }
+    runGit(['remote', hasOrigin ? 'set-url' : 'add', 'origin', repoUrl], store.BACKUP_WORKSPACE);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -254,14 +293,14 @@ async function webdavTestConnection() {
 }
 
 async function doLocalBackup(config, timestamp) {
-  const baseDir = config.localBackupDir || path.join(os.homedir(), 'cc-manager-local-backups');
+  const baseDir = config.localBackupDir || defaultLocalBackupDir();
   const backupDir = path.join(baseDir, timestamp);
   try {
     fs.mkdirSync(backupDir, { recursive: true });
 
     const src = store.BACKUP_WORKSPACE;
     if (fs.existsSync(src)) {
-      execSync(`xcopy "${src}" "${backupDir}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
+      copyDirectory(src, backupDir);
       return { ok: true, message: `已备份到 ${backupDir}` };
     }
     return { ok: false, error: '备份工作区不存在' };
@@ -273,7 +312,7 @@ async function doLocalBackup(config, timestamp) {
 // 增量备份：只复制 mtime > refMtime 的文件
 // 记录 .diff-ref 元数据，标记"我相对于哪个备份做了 diff"
 async function doDiffBackup(config, timestamp, refMtime, refDir) {
-  const baseDir = config.localBackupDir || path.join(os.homedir(), 'cc-manager-local-backups');
+  const baseDir = config.localBackupDir || defaultLocalBackupDir();
   const backupDir = path.join(baseDir, `auto-${timestamp}`);
   let totalCopied = 0;
   let maxMtime = 0;
@@ -315,17 +354,27 @@ async function doDiffBackup(config, timestamp, refMtime, refDir) {
     copyNewer(claudeSrc, path.join(backupDir, 'claude-sessions'));
     copyNewer(codexSrc, path.join(backupDir, 'codex-sessions'));
 
-    if (maxMtime > 0) {
-      const metaFile = path.join(store.CC_MANAGER_DIR, 'meta.json');
-      if (fs.existsSync(metaFile)) {
-        fs.copyFileSync(metaFile, path.join(backupDir, 'cc-manager-meta.json'));
-      }
+    const metaFile = path.join(store.CC_MANAGER_DIR, 'meta.json');
+    if (fs.existsSync(metaFile)) {
+      try {
+        const stat = fs.statSync(metaFile);
+        if (stat.mtimeMs > refMtime) {
+          fs.copyFileSync(metaFile, path.join(backupDir, 'cc-manager-meta.json'));
+          totalCopied++;
+          if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
+        }
+      } catch (e) { /* 元数据不可读时保留会话备份结果 */ }
+    }
 
+    if (maxMtime > 0) {
       // 写入 .diff-ref 元数据
       const refInfo = { createdAt: timestamp, isDiff: true };
-      if (refDir && fs.existsSync(path.join(baseDir, refDir, 'claude-sessions'))) {
-        refInfo.refDir = refDir;
-        refInfo.refMtime = refMtime;
+      if (refDir && path.basename(refDir) === refDir) {
+        const previousDir = path.resolve(baseDir, refDir);
+        if (isPathInside(path.resolve(baseDir), previousDir) && isBackupDirectory(previousDir)) {
+          refInfo.refDir = refDir;
+          refInfo.refMtime = refMtime;
+        }
       }
       fs.writeFileSync(path.join(backupDir, '.diff-ref'), JSON.stringify(refInfo, null, 2), 'utf-8');
 
@@ -338,20 +387,47 @@ async function doDiffBackup(config, timestamp, refMtime, refDir) {
   }
 }
 
-async function asyncRunBackup(isAuto) {
+let activeOperation = null;
+
+function runExclusiveOperation(label, task) {
+  if (activeOperation) {
+    return Promise.resolve({ ok: false, error: `正在执行${activeOperation.label}，请稍后重试` });
+  }
+  const promise = Promise.resolve().then(task);
+  activeOperation = { label, promise };
+  return promise.finally(() => {
+    if (activeOperation && activeOperation.promise === promise) activeOperation = null;
+  });
+}
+
+function asyncRunBackup(isAuto) {
+  return runExclusiveOperation('备份', () => runBackup(isAuto));
+}
+
+async function runBackup(isAuto) {
   const config = store.getConfig();
-  if (!isAuto) buildBackupSnapshot(); // 全量备份需要重建 workspace
-  const timestamp = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
+  const timestamp = new Date().toISOString().replace(/[T:.Z]/g, '-').replace(/-+$/, '');
   let results = [];
   let newMaxMtime = 0;
+  let snapshotReady = false;
+
+  function ensureSnapshot() {
+    if (!snapshotReady) {
+      buildBackupSnapshot();
+      snapshotReady = true;
+    }
+  }
+
+  if (!isAuto) ensureSnapshot();
 
   const targets = selectBackupTargets(config.backupTarget);
   for (const t of targets) {
     if (t === 'github') {
-      if (!isAuto) buildBackupSnapshot(); // git 也需要完整 workspace
+      // Git/WebDAV 自动备份同样必须刷新工作区，不能上传上一次的陈旧快照。
+      ensureSnapshot();
       results.push({ target: 'github', ...(config.repoUrl ? doGitBackup(config, timestamp) : { ok: false, error: '未配置仓库 URL' }) });
     } else if (t === 'webdav') {
-      if (!isAuto) buildBackupSnapshot();
+      ensureSnapshot();
       if (config.webdavUrl) {
         const r = await doWebdavBackup(config, timestamp);
         results.push({ target: 'webdav', ...r });
@@ -366,7 +442,7 @@ async function asyncRunBackup(isAuto) {
         results.push({ target: 'local', ...r });
         if (r.maxMtime > newMaxMtime) newMaxMtime = r.maxMtime;
       } else {
-        buildBackupSnapshot();
+        ensureSnapshot();
         results.push({ target: 'local', ...(await doLocalBackup(config, timestamp)) });
       }
     }
@@ -377,26 +453,30 @@ async function asyncRunBackup(isAuto) {
     store.updateConfig({ autoBackupMtime: newMaxMtime, lastAutoBackupDir: `auto-${timestamp}` });
   }
 
-  // workspace git 提交（仅在非自动备份时执行，自动备份没有 workspace）
-  try {
-    const wd = store.BACKUP_WORKSPACE;
-    runGit(['add', '-A'], wd);
-    const raw = runGit(['status', '--porcelain'], wd);
-    if (raw.trim()) {
-      runGit(['commit', '-m', `backup ${timestamp}`], wd);
+  // 只要本轮实际构建过 workspace，就把快照记录进本地 git 历史。
+  if (snapshotReady) {
+    try {
+      const wd = store.BACKUP_WORKSPACE;
+      runGit(['add', '-A'], wd);
+      const raw = runGit(['status', '--porcelain'], wd);
+      if (raw.trim()) {
+        runGit(['commit', '-m', `backup ${timestamp}`], wd);
+      }
+    } catch (e) {
+      // workspace git 提交失败不影响已经完成的其他备份目标
     }
-  } catch (e) {
-    // workspace git 提交失败不影响备份本身
   }
 
-  store.updateConfig({ lastBackupAt: Date.now() });
   const allOk = results.every(r => r.ok);
+  if (results.some(r => r.ok)) store.updateConfig({ lastBackupAt: Date.now() });
   const messages = results.map(r => r.target + ': ' + (r.message || r.error || '?'));
   return { ok: allOk, message: messages.join('; '), timestamp, results };
 }
 
 // 列出备份历史——合并两个来源，支持分页
 function listBackupHistory({ page = 1, pageSize = 20 } = {}) {
+  page = Number.isFinite(Number(page)) ? Math.max(1, Math.floor(Number(page))) : 1;
+  pageSize = Number.isFinite(Number(pageSize)) ? Math.max(1, Math.min(100, Math.floor(Number(pageSize)))) : 20;
   // 第 1 步：收集全部条目（两个来源合并）
   let all = [];
 
@@ -412,25 +492,18 @@ function listBackupHistory({ page = 1, pageSize = 20 } = {}) {
     } catch (e) { /* 忽略 */ }
   }
 
-  const localDir = path.join(os.homedir(), 'cc-manager-local-backups');
-  if (fs.existsSync(localDir)) {
+  for (const localDir of getLocalBackupRoots()) {
+    if (!fs.existsSync(localDir)) continue;
     try {
       const dirs = fs.readdirSync(localDir, { withFileTypes: true })
-        .filter(e => e.isDirectory() && fs.existsSync(path.join(localDir, e.name, 'claude-sessions')));
+        .filter(e => e.isDirectory() && isBackupDirectory(path.join(localDir, e.name)));
       for (const entry of dirs) {
         const name = entry.name;
         let ts = 0;
-        if (name.startsWith('pre-restore-')) {
-          // pre-restore-2026-06-24-20-02-06 → 去掉前缀再解析
-          const p = name.replace('pre-restore-', '').split('-').map(Number);
-          if (p.length >= 6 && !isNaN(p[0])) {
-            ts = new Date(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0).getTime();
-          }
-        } else {
-          const p = name.split('-').map(Number);
-          if (p.length >= 6 && !isNaN(p[0])) {
-            ts = new Date(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0).getTime();
-          }
+        const normalizedName = name.replace(/^(pre-restore-|auto-)/, '');
+        const p = normalizedName.split('-').map(Number);
+        if (p.length >= 6 && !isNaN(p[0])) {
+          ts = new Date(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0).getTime();
         }
         if (ts) {
           all.push({ id: path.join(localDir, name), type: 'local', hash: name, timestamp: ts, message: `本地备份 ${name}` });
@@ -454,64 +527,116 @@ function listBackupHistory({ page = 1, pageSize = 20 } = {}) {
   return { entries, total, page: safePage, pageSize, totalPages };
 }
 
+function createSafetyBackup() {
+  const safeTs = new Date().toISOString().replace(/[T:.Z]/g, '-').replace(/-+$/, '');
+  const safeDir = path.join(defaultLocalBackupDir(), `pre-restore-${safeTs}`);
+  const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
+  const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
+  fs.mkdirSync(safeDir, { recursive: true });
+  copyDirectory(claudeSrc, path.join(safeDir, 'claude-sessions'));
+  copyDirectory(codexSrc, path.join(safeDir, 'codex-sessions'));
+  return { safeDir, claudeSrc, codexSrc };
+}
+
+function validateRestoreOptions(cli, mode) {
+  if (cli && !['claude', 'codex'].includes(cli)) throw new Error('cli 参数无效');
+  if (!['incremental', 'merge', 'full'].includes(mode)) throw new Error('mode 参数无效');
+}
+
+function resolveAllowedLocalBackup(backupPath) {
+  if (typeof backupPath !== 'string' || !backupPath.trim()) return null;
+  let realCandidate;
+  try { realCandidate = fs.realpathSync(path.resolve(backupPath)); }
+  catch (e) { return null; }
+  if (!fs.statSync(realCandidate).isDirectory() || !isBackupDirectory(realCandidate)) return null;
+
+  for (const root of getLocalBackupRoots()) {
+    try {
+      const realRoot = fs.realpathSync(root);
+      if (isPathInside(realRoot, realCandidate)) return realCandidate;
+    } catch (e) { /* 尚不存在的备份根目录 */ }
+  }
+  return null;
+}
+
 // 从某个 commit 恢复（mode: incremental / merge / full）
-async function restoreFromCommit(hash, cli, mode) {
+function restoreFromCommit(hash, cli, mode) {
+  return runExclusiveOperation('恢复', () => runRestoreFromCommit(hash, cli, mode));
+}
+
+async function runRestoreFromCommit(hash, cli, mode) {
+  mode = mode || 'incremental';  // 默认增量
+  try { validateRestoreOptions(cli, mode); }
+  catch (e) { return { ok: false, error: e.message }; }
+  if (typeof hash !== 'string' || !/^[0-9a-f]{7,64}$/i.test(hash)) {
+    return { ok: false, error: '备份 commit hash 无效' };
+  }
   if (!fs.existsSync(path.join(store.BACKUP_WORKSPACE, '.git'))) {
     return { ok: false, error: '备份仓库不存在' };
   }
-  mode = mode || 'incremental';  // 默认增量
 
+  let workspaceMutated = false;
+  let result;
   try {
     // 1. 恢复前安全备份当前状态
-    const safeTs = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
-    const backupDir = path.join(os.homedir(), 'cc-manager-local-backups', `pre-restore-${safeTs}`);
-    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
-    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
-    fs.mkdirSync(backupDir, { recursive: true });
-    if (fs.existsSync(claudeSrc)) {
-      execSync(`xcopy "${claudeSrc}" "${path.join(backupDir, 'claude-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    }
-    if (fs.existsSync(codexSrc)) {
-      execSync(`xcopy "${codexSrc}" "${path.join(backupDir, 'codex-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    }
+    const { safeDir: backupDir, claudeSrc, codexSrc } = createSafetyBackup();
 
     // 2. 清空工作区（保留 .git）后检出目标 commit
     //    先清空保证工作区严格等于该 commit，不会残留后续备份新增的文件
     wipeWorkspace();
+    workspaceMutated = true;
     runGit(['checkout', hash, '--', '.'], store.BACKUP_WORKSPACE);
 
     // 3. 根据模式复制
     const claudeSrcBackup = path.join(store.BACKUP_WORKSPACE, 'claude-sessions');
     const codexSrcBackup = path.join(store.BACKUP_WORKSPACE, 'codex-sessions');
+    if (cli === 'claude' && !fs.existsSync(claudeSrcBackup)) throw new Error('该备份不包含 Claude 会话');
+    if (cli === 'codex' && !fs.existsSync(codexSrcBackup)) throw new Error('该备份不包含 Codex 会话');
+    if (!cli && !fs.existsSync(claudeSrcBackup) && !fs.existsSync(codexSrcBackup)) {
+      throw new Error('该 commit 不包含可恢复的会话');
+    }
 
     if (!cli || cli === 'claude') {
-      copyWithMode(claudeSrcBackup, claudeSrc, mode);
+      copyWithMode(claudeSrcBackup, claudeSrc, mode, path.join(backupDir, 'original-claude-sessions'));
     }
     if (!cli || cli === 'codex') {
-      copyWithMode(codexSrcBackup, codexSrc, mode);
+      copyWithMode(codexSrcBackup, codexSrc, mode, path.join(backupDir, 'original-codex-sessions'));
     }
 
-    // 4. 恢复工作区到当前分支（HEAD）
-    //    git checkout <hash> -- . 会同时改 index+worktree，git checkout -- . 只从（已被污染的）index 还原，无法回到 HEAD
-    //    必须用 git reset --hard HEAD 才能把 index+worktree 都恢复到最新备份
-    try {
-      runGit(['reset', '--hard', 'HEAD'], store.BACKUP_WORKSPACE);
-    } catch (e) { /* 忽略 */ }
-
     store.updateConfig({ lastRestoreAt: Date.now() });
-    return {
+    result = {
       ok: true,
       message: `已从 ${hash.slice(0, 8)} ${mode}恢复，恢复前已备份到 ${backupDir}`,
       safetyBackup: backupDir
     };
   } catch (e) {
-    return { ok: false, error: e.message };
+    result = { ok: false, error: e.message };
+  } finally {
+    // checkout 会同时改 index/worktree；无论复制成功与否都必须回到 HEAD。
+    if (workspaceMutated) {
+      try { runGit(['reset', '--hard', 'HEAD'], store.BACKUP_WORKSPACE); }
+      catch (e) {
+        result = { ok: false, error: `恢复后无法还原备份工作区: ${e.message}` };
+      }
+    }
   }
+  return result;
 }
 
 // 按模式复制文件
-function copyWithMode(srcDir, destDir, mode) {
+function copyWithMode(srcDir, destDir, mode, fullArchiveDir) {
   if (!fs.existsSync(srcDir)) return;
+  if (!['incremental', 'merge', 'full'].includes(mode)) throw new Error('mode 参数无效');
+
+  if (mode === 'full') {
+    if (fs.existsSync(destDir)) {
+      if (!fullArchiveDir) throw new Error('full 模式必须提供原目录归档位置');
+      if (fs.existsSync(fullArchiveDir)) throw new Error(`归档位置已存在: ${fullArchiveDir}`);
+      fs.mkdirSync(path.dirname(fullArchiveDir), { recursive: true });
+      fs.renameSync(destDir, fullArchiveDir);
+    }
+    fs.mkdirSync(destDir, { recursive: true });
+  }
 
   const files = [];
   function walk(dir, relative) {
@@ -544,7 +669,7 @@ function copyWithMode(srcDir, destDir, mode) {
         fs.copyFileSync(f.src, destFile);
         break;
       case 'full':
-        // 完全覆盖（xcopy /Y 行为）
+        // 目标目录已在遍历前清空，此处复制完整快照。
         fs.mkdirSync(path.dirname(destFile), { recursive: true });
         fs.copyFileSync(f.src, destFile);
         break;
@@ -553,7 +678,17 @@ function copyWithMode(srcDir, destDir, mode) {
 }
 
 // 从本地备份目录恢复
-async function restoreFromLocalBackup(backupPath, cli, mode) {
+function restoreFromLocalBackup(backupPath, cli, mode) {
+  return runExclusiveOperation('恢复', () => runRestoreFromLocalBackup(backupPath, cli, mode));
+}
+
+async function runRestoreFromLocalBackup(backupPath, cli, mode) {
+  mode = mode || 'incremental';
+  try { validateRestoreOptions(cli, mode); }
+  catch (e) { return { ok: false, error: e.message }; }
+  backupPath = resolveAllowedLocalBackup(backupPath);
+  if (!backupPath) return { ok: false, error: '本地备份路径无效或不在允许的备份目录中' };
+
   const chain = [];
   // 构建链：从当前备份一路向上回溯到全量基准
   let current = backupPath;
@@ -565,11 +700,13 @@ async function restoreFromLocalBackup(backupPath, cli, mode) {
     if (fs.existsSync(refFile)) {
       try {
         const ref = JSON.parse(fs.readFileSync(refFile, 'utf-8'));
-        if (ref.isDiff && ref.refDir) {
+        if (ref.isDiff && ref.refDir && path.basename(ref.refDir) === ref.refDir) {
           const baseDir = path.dirname(backupPath);
-          const parent = path.join(baseDir, ref.refDir);
-          if (fs.existsSync(path.join(parent, 'claude-sessions'))) {
-            current = parent;
+          const parent = path.resolve(baseDir, ref.refDir);
+          let realParent = null;
+          try { realParent = fs.realpathSync(parent); } catch (e) { /* 引用已丢失 */ }
+          if (realParent && isPathInside(baseDir, realParent) && isBackupDirectory(realParent)) {
+            current = realParent;
             continue;
           }
         }
@@ -580,32 +717,32 @@ async function restoreFromLocalBackup(backupPath, cli, mode) {
   chain.reverse(); // 从最老到最新
 
   try {
-    const claudeSrc = path.join(os.homedir(), '.claude', 'projects');
-    const codexSrc = path.join(os.homedir(), '.codex', 'sessions');
+    const hasClaudeBackup = chain.some(dir => fs.existsSync(path.join(dir, 'claude-sessions')));
+    const hasCodexBackup = chain.some(dir => fs.existsSync(path.join(dir, 'codex-sessions')));
+    if (cli === 'claude' && !hasClaudeBackup) throw new Error('该备份链不包含 Claude 会话');
+    if (cli === 'codex' && !hasCodexBackup) throw new Error('该备份链不包含 Codex 会话');
+    if (!cli && !hasClaudeBackup && !hasCodexBackup) throw new Error('该备份链不包含可恢复的会话');
 
     // 安全备份当前状态
-    const safeTs = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
-    const safeDir = path.join(os.homedir(), 'cc-manager-local-backups', `pre-restore-${safeTs}`);
-    fs.mkdirSync(safeDir, { recursive: true });
-    if (fs.existsSync(claudeSrc)) {
-      execSync(`xcopy "${claudeSrc}" "${path.join(safeDir, 'claude-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    }
-    if (fs.existsSync(codexSrc)) {
-      execSync(`xcopy "${codexSrc}" "${path.join(safeDir, 'codex-sessions')}" /E /I /Q /Y > nul 2>&1`, { timeout: 30000 });
-    }
+    const { safeDir, claudeSrc, codexSrc } = createSafetyBackup();
 
     // 链式恢复：从全量基准开始，逐层叠加
     let appliedCount = 0;
+    let claudeFullApplied = false;
+    let codexFullApplied = false;
     for (const dir of chain) {
       const claudeBackup = path.join(dir, 'claude-sessions');
       const codexBackup = path.join(dir, 'codex-sessions');
-      // 全量基准用 merge 模式（覆盖+添加），确保后续 diff 的文件有完整基础
-      const applyMode = (chain.length > 1 && dir === chain[0]) ? 'merge' : mode;
-      if (!cli || cli === 'claude') {
-        copyWithMode(claudeBackup, claudeSrc, applyMode);
+      // full 对每种 CLI 只在首个有数据的层清空一次，后续 diff 采用 merge 叠加。
+      if ((!cli || cli === 'claude') && fs.existsSync(claudeBackup)) {
+        const applyMode = mode === 'full' ? (claudeFullApplied ? 'merge' : 'full') : mode;
+        copyWithMode(claudeBackup, claudeSrc, applyMode, path.join(safeDir, 'original-claude-sessions'));
+        claudeFullApplied = true;
       }
-      if (!cli || cli === 'codex') {
-        copyWithMode(codexBackup, codexSrc, applyMode);
+      if ((!cli || cli === 'codex') && fs.existsSync(codexBackup)) {
+        const applyMode = mode === 'full' ? (codexFullApplied ? 'merge' : 'full') : mode;
+        copyWithMode(codexBackup, codexSrc, applyMode, path.join(safeDir, 'original-codex-sessions'));
+        codexFullApplied = true;
       }
       appliedCount++;
     }

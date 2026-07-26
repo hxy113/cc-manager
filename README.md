@@ -1,154 +1,104 @@
 <p align="center">
   <h1 align="center">cc-manager</h1>
-  <p align="center">本地 AI CLI 会话管理与备份工具</p>
+  <p align="center">Claude Code / Codex CLI 本地会话浏览、整理与备份工具</p>
   <p align="center">
-    支持 <b>Claude Code</b> · <b>Codex CLI</b>
-  </p>
-  <p align="center">
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
-    <a href="https://github.com/hxy113/cc-manager/releases"><img src="https://img.shields.io/github/v/release/hxy113/cc-manager" alt="Version"></a>
-    <a href="https://github.com/hxy113/cc-manager/commits/main"><img src="https://img.shields.io/github/last-commit/hxy113/cc-manager" alt="Last Commit"></a>
-    <img src="https://img.shields.io/github/repo-size/hxy113/cc-manager" alt="Repo Size">
+    <a href="https://github.com/hxy113/cc-manager/actions/workflows/ci.yml"><img src="https://github.com/hxy113/cc-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
   </p>
 </p>
 
----
+cc-manager 在本机启动一个 Web UI，直接读取 Claude Code 和 Codex CLI 的 `.jsonl` 会话文件。它不代理模型请求，也不接管 CLI 通信。
 
-**cc-manager** 是一个本地 Web UI 工具，用于浏览、管理和备份 **Claude Code** 和 **Codex CLI** 的本地会话记录。
+## 主要功能
 
-### 它能做什么
+- 按 CLI 和工作目录浏览会话，预览用户消息、AI 回复、思考块、工具调用和工具结果。
+- 按时间、标题或消息数排序；搜索标题和内容，并支持正则表达式。
+- 设置别名、收藏会话、按用户输入快速导航。
+- 在对应项目目录中打开 `claude --resume` 或 `codex resume`。
+- Fork 会话，或在内置编辑器中删改、插入、重排消息；两者都会另存为新会话，不原地覆盖源文件。
+- 导出 Markdown；删除时先复制到项目外的 `trash` 目录。
+- 备份到本地目录、Git 仓库和 WebDAV；浏览本地/Git 历史并按三种模式恢复。
 
-| 场景 | 怎么做 |
-|------|--------|
-| 在 `D:\claudecode` 下聊了一大堆，想翻某条记录 | 打开 cc-manager，按项目找到会话，右侧直接预览 |
-| 会话太多了，找不到了 | 搜索标题 + 内容，还支持正则 |
-| 某个回复挺好用的，想在此基础上重开一局 | Fork 当前会话，生成新的 sessionId |
-| 怕对话丢了怎么办 | 三路备份：本地目录 + GitHub 私有仓库 + WebDAV，默认全自动 |
-
----
-
-## 功能
-
-- **三栏 UI**：左侧选 CLI + 项目 → 中间列会话 → 右侧预览聊天（用户输入蓝底，AI 回复绿底，工具结果灰底折叠）
-- **跨项目会话管理**：Claude 按原路径分项目（`D:\claudecode`、`D:\Qt\...`），Codex 按工作目录聚合
-- **内容搜索**：默认搜索标题+内容全文，支持正则模式
-- **用户输入导航**：长对话时打开侧栏，点击跳转到任意用户输入位置
-- **别名 / 收藏**：给会话起易记名，收藏置顶
-- **Fork**：复制会话为新副本，改造旧对话时不影响原版
-- **安全删除**：文件移至 `trash/`（带时间戳），物理保留可恢复
-- **三路备份**：本地文件 + GitHub 私有仓库 + WebDAV，一键或自动
-- **Markdown 导出**：把单条对话导出为 `.md` 文件
-- **纯浏览器端界面**：零构建工具链，打开即用
-
----
+完整操作说明见[用户指南](./docs/USER_GUIDE.md)，当前限制见[已知限制](./docs/KNOWN_LIMITATIONS.md)。
 
 ## 快速开始
 
-### 前提
+要求：
 
-- [Node.js](https://nodejs.org/) >= 18
-- 本地已有 Claude Code 或 Codex CLI 的使用记录（有 .jsonl 会话文件）
+- Windows 10/11；核心浏览与备份代码可跨平台，但“在 CLI 中打开”目前依赖 Windows `cmd`。
+- Node.js 18 或更高版本。
+- 本机已有 Claude Code 或 Codex CLI 会话记录。
+- 使用 Git 备份时需要安装 Git。
 
-### 运行
-
-```bash
-# 克隆 / 下载
+```powershell
 git clone https://github.com/hxy113/cc-manager.git
 cd cc-manager
-
-# 安装依赖
 npm install
-
-# 启动
 npm start
-
-# 浏览器打开
-open http://localhost:17890
 ```
 
-> 默认端口 17890，可通过 `npm start -- 9000` 指定其他端口。
+服务默认只监听 `127.0.0.1:17890`，通常会自动打开浏览器；也可以手动访问 `http://localhost:17890`。
 
----
+指定其他端口：
 
-## 界面概览
-
-```
-+------------------------------------------------------+
-| cc-manager  [状态] [一键备份] [恢复] [设置]          |
-+----------+-------------------+------------------------+
-| Claude   |  排序    搜索     |  会话内容预览           |
-| Codex    |                  |                         |
-|          |  怎么改路径       |  USER                  |
-| 项目列表  |  爬虫方案         |  如何更改Windows...   |
-| D:\code  |  安卓程序         |                         |
-| D:\qt    |  已删除会话       |  ASSISTANT             |
-|          |                  |  你可以通过设置...      |
-+----------+-------------------+------------------------+
-| 用户输入导航  <- 点击展开，快速跳转                    |
-+------------------------------------------------------+
+```powershell
+npm start -- 9000
 ```
 
-### 三栏说明
+运行测试：
 
-| 区域 | 内容 |
-|------|------|
-| **左栏** | 顶部切换 Claude / Codex；下面列出该 CLI 下的所有项目文件夹（显示原路径） |
-| **中栏** | 选中某项目后列出所有会话；支持按时间、名称、消息数排序；搜索框支持标题+内容+正则 |
-| **右栏** | 单击会话后预览完整聊天记录，user/assistant/tool 按角色分色渲染 |
-
----
-
-## 备份配置
-
-cc-manager 提供三种备份方式，可在 UI 的设置面板中配置：
-
-| 方式 | 配置 | 特点 |
-|------|------|------|
-| **本地文件** | 默认即可 | 零依赖，一定会成功，备份到 `~/cc-manager-local-backups/` |
-| **GitHub 仓库** | 填入仓库 URL | 版本化管理，可回滚任意历史版本；需环境变量 `CC_MANAGER_GH_TOKEN` |
-| **WebDAV** | 填入服务器 URL + 用户名 | 可对接自建云盘（Nextcloud、ownCloud 等）；密码设环境变量 `CC_MANAGER_WEBDAV_PASS` |
-
-备份目标可选「本地」「GitHub」「WebDAV」「全部」四种模式。默认「本地文件」，开箱即用。
-
-备份周期可在设置中调整（默认 60 分钟），也可随时点顶栏的「一键备份」手动触发。
-
-> 安全设计：GitHub token 和 WebDAV 密码仅通过环境变量读取，代码不硬编码。
-
----
-
-## 项目结构
-
-```
-cc-manager/
-├── server/               # 后端（Node.js + Express）
-│   ├── index.js          # CLI 入口（ui / backup / restore 子命令）
-│   ├── server.js         # HTTP 服务器 + 自动备份定时器
-│   ├── routes.js         # REST API 路由
-│   ├── store.js          # 元数据持久化 + Markdown 导出
-│   ├── backup.js         # 三路备份（本地/GitHub/WebDAV）+ 恢复
-│   └── adapters/
-│       ├── claude.js     # Claude 会话适配器
-│       └── codex.js      # Codex 会话适配器
-├── web/                  # 前端（纯 HTML + CSS + JS）
-│   └── index.html        # 三栏单页应用
-├── package.json
-├── LICENSE (MIT)
-└── README.md
+```powershell
+npm test
 ```
 
----
+## CLI
 
-## 技术栈
+```text
+cc-manager ui [port]              启动 Web UI
+cc-manager backup                 按当前配置执行一次手动备份
+cc-manager backup --init          初始化内部备份 Git 仓库
+cc-manager backup --set-remote URL 设置 Git 远程地址
+cc-manager backup --first-push    备份并尝试首次推送
+cc-manager restore                列出最近备份并提示使用 UI 恢复
+cc-manager help                   显示帮助
+```
 
-| 层 | 选型 | 理由 |
-|----|------|------|
-| 后端 | Node.js + Express | 跨平台，零额外运行时，npm 生态 |
-| 前端 | 原生 HTML + CSS + JS | 零构建依赖，clone 即用，无需 webpack/vite |
-| 数据源 | .jsonl 文件 | Claude Code / Codex CLI 原生存储格式，直接读取 |
-| 备份 Git | 内嵌 git 工作区 | 版本管理，增量 commit，可回滚到任意历史点 |
+`npm start` 等价于 `cc-manager ui`。CLI 子命令的实现入口是 `server/index.js`。
 
----
+## 默认行为
+
+| 项目 | 默认值 |
+|---|---|
+| HTTP 地址 | `http://127.0.0.1:17890` |
+| 备份目标 | `local` |
+| 自动备份周期 | 1440 分钟（24 小时）；设为 0 可关闭 |
+| 本地备份目录 | `~/cc-manager-local-backups/` |
+| 内部 Git 工作区 | `~/.cc-manager/backup-workspace/` |
+| 元数据与配置 | `~/.cc-manager/meta.json`、`config.json` |
+
+自动备份与手动备份并不完全相同：本地自动备份采用基于修改时间的 diff 链；手动本地备份、Git 和 WebDAV 使用完整工作区快照。详见[用户指南的备份章节](./docs/USER_GUIDE.md#备份)。
+
+## 安全边界
+
+- 服务只绑定回环地址并拒绝非 loopback Host，不应放到反向代理或公网后面。
+- 普通浏览只读会话；Fork/编辑会写新会话文件，删除会移动源文件，恢复会改写会话目录。
+- 恢复前会自动创建安全快照；`full` 模式还会归档原活动目录，不直接删除。
+- GitHub token 和 WebDAV 密码只从环境变量读取：
+  - `CC_MANAGER_GH_TOKEN`
+  - `CC_MANAGER_WEBDAV_PASS`
+
+## 文档
+
+- [文档导航与维护规则](./docs/README.md)
+- [用户指南](./docs/USER_GUIDE.md)
+- [API 参考](./docs/API.md)
+- [架构说明](./docs/ARCHITECTURE.md)
+- [开发指南](./docs/DEVELOPMENT.md)
+- [已知限制](./docs/KNOWN_LIMITATIONS.md)
+- [变更记录](./docs/CHANGELOG.md)
+- [贡献指南](./CONTRIBUTING.md)
+- [安全策略](./SECURITY.md)
 
 ## 许可证
 
-[MIT](LICENSE) (c) 2026 cc-manager contributors
+[MIT](./LICENSE)

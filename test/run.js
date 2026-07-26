@@ -7,29 +7,25 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// 测试框架：简单的 pass/fail 收集器
+// 测试框架：先注册，再在 main 中逐个 await，避免异步测试被提前判定为通过。
+const tests = [];
 const results = [];
 function test(name, fn) {
-  try {
-    fn();
-    results.push({ name, ok: true });
-  } catch (e) {
-    results.push({ name, ok: false, error: e.message });
-  }
-}
-async function testAsync(name, fn) {
-  try {
-    await fn();
-    results.push({ name, ok: true });
-  } catch (e) {
-    results.push({ name, ok: false, error: e.message });
-  }
+  tests.push({ name, fn });
 }
 
 // ========== claude 适配器 ==========
 const claude = require('../server/adapters/claude');
 const codex = require('../server/adapters/codex');
 const opencli = require('../server/opencli');
+const serverModule = require('../server/server');
+
+test('server.isAllowedHost: 仅接受 loopback Host', () => {
+  assert.ok(serverModule.isAllowedHost('localhost:17890'));
+  assert.ok(serverModule.isAllowedHost('127.0.0.1:17890'));
+  assert.ok(serverModule.isAllowedHost('[::1]:17890'));
+  assert.ok(!serverModule.isAllowedHost('evil.example:17890'));
+});
 
 test('decodeProjectDir: D--claudecode -> D:\\claudecode', () => {
   assert.strictEqual(claude.decodeProjectDir('D--claudecode'), 'D:\\claudecode');
@@ -149,15 +145,35 @@ test('store.exportSessionAsMarkdown: 跳过系统事件行', () => {
 // 这里用临时目录模拟增量/合并/完全覆盖的差异
 const backup = require('../server/backup');
 
-test('backup.gitAvailable: 能检测到 git', () => {
-  // 用户机器装了 git，应返回 true
-  assert.strictEqual(backup.gitAvailable(), true);
+test('backup.gitAvailable: 始终返回布尔值', () => {
+  assert.strictEqual(typeof backup.gitAvailable(), 'boolean');
 });
 
-test('backup.listBackupHistory: 无 git 时返回空数组', () => {
-  // workspace 可能已初始化，这里只验证返回的是数组
+test('backup.listBackupHistory: 返回稳定的分页结构', () => {
   const h = backup.listBackupHistory();
-  assert.ok(Array.isArray(h));
+  assert.ok(h && Array.isArray(h.entries));
+  assert.strictEqual(typeof h.total, 'number');
+});
+
+test('backup.restoreFromCommit: 提前拒绝非 hash 参数', async () => {
+  const result = await backup.restoreFromCommit('--orphan', 'claude', 'incremental');
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.error.includes('hash'));
+});
+
+test('backup.restoreFromLocalBackup: 拒绝备份根目录之外的路径', async () => {
+  const result = await backup.restoreFromLocalBackup(process.cwd(), 'claude', 'incremental');
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.error.includes('路径'));
+});
+
+test('backup: 备份与恢复操作互斥', async () => {
+  const first = backup.restoreFromCommit('--orphan', 'claude', 'incremental');
+  const second = backup.restoreFromLocalBackup(process.cwd(), 'claude', 'incremental');
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.strictEqual(firstResult.ok, false);
+  assert.strictEqual(secondResult.ok, false);
+  assert.ok(secondResult.error.includes('正在执行'));
 });
 
 // ========== 模拟 copyWithMode 行为（独立实现一份对照）==========
@@ -271,19 +287,65 @@ test('wipeWorkspace: 清空工作区文件但保留 .git', () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-// --- bug3: copyWithMode full 模式覆盖同名文件 ---
-test('copyWithMode full: 覆盖同名文件，dest 独有保留', () => {
+// --- full: 目标应严格等于备份，旧目录移入安全归档而非直接删除 ---
+test('copyWithMode full: 完整替换并归档旧目录', () => {
   const tmp = path.join(os.tmpdir(), `cc-full-${Date.now()}`);
-  const src = path.join(tmp, 'src'), dest = path.join(tmp, 'dest');
+  const src = path.join(tmp, 'src'), dest = path.join(tmp, 'dest'), archive = path.join(tmp, 'archive');
   fs.mkdirSync(src, { recursive: true });
   fs.mkdirSync(dest, { recursive: true });
   fs.writeFileSync(path.join(src, 'a.jsonl'), 'NEW');
   fs.writeFileSync(path.join(dest, 'a.jsonl'), 'OLD');
   fs.writeFileSync(path.join(dest, 'extra.jsonl'), 'EXTRA');
-  backup.copyWithMode(src, dest, 'full');
+  backup.copyWithMode(src, dest, 'full', archive);
   assert.strictEqual(fs.readFileSync(path.join(dest, 'a.jsonl'), 'utf-8'), 'NEW', 'full 应覆盖同名文件');
-  assert.strictEqual(fs.readFileSync(path.join(dest, 'extra.jsonl'), 'utf-8'), 'EXTRA', 'dest 独有文件应保留');
+  assert.ok(!fs.existsSync(path.join(dest, 'extra.jsonl')), 'full 后目标独有文件不应继续留在活动目录');
+  assert.strictEqual(fs.readFileSync(path.join(archive, 'extra.jsonl'), 'utf-8'), 'EXTRA', '旧目录应保留在安全归档');
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('claude.resolveProjectDir: 拒绝路径穿越', () => {
+  assert.strictEqual(claude.resolveProjectDir('..'), null);
+  assert.strictEqual(claude.resolveProjectDir('..\\outside'), null);
+});
+
+test('claude.resolveProjectDir: Windows realpath 被拒时仍可读取安全的直接子目录', () => {
+  const root = path.join(os.tmpdir(), `cc-project-root-${Date.now()}`);
+  const child = path.join(root, 'D--safe-project');
+  fs.mkdirSync(child, { recursive: true });
+  const originalRealpath = fs.realpathSync;
+  fs.realpathSync = () => {
+    const error = new Error('operation not permitted');
+    error.code = 'EPERM';
+    throw error;
+  };
+  try {
+    assert.strictEqual(claude.resolveProjectDir('D--safe-project', root), child);
+    assert.strictEqual(claude.resolveProjectDir('..', root), null);
+  } finally {
+    fs.realpathSync = originalRealpath;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('codex.parseJsonl: 活跃会话损坏末行不影响前面内容', () => {
+  const tmp = path.join(os.tmpdir(), `cc-codex-partial-${Date.now()}.jsonl`);
+  fs.writeFileSync(tmp, '{"type":"session_meta","payload":{"id":"ok"}}\n{"type":"response_item"');
+  try {
+    const parsed = codex.parseJsonl(tmp);
+    assert.strictEqual(parsed.length, 1);
+    assert.strictEqual(parsed[0].type, 'session_meta');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+});
+
+test('前端会话操作不把动态 ID 拼入内联 JavaScript', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.html'), 'utf-8');
+  assert.ok(html.includes('data-action="open"'));
+  assert.ok(!html.includes("openInCli('${s.id}')"));
+  assert.ok(!html.includes("deleteSession('${s.id}')"));
+  assert.ok(html.includes("$('#setting-branch').value = s.branch || 'main'"));
+  assert.ok(html.includes("$('#setting-webdav-user').value = s.webdavUsername || ''"));
 });
 
 // --- bug2: claude.writeFork 写新文件 + sessionId 替换 + 源文件不动 ---
@@ -391,17 +453,60 @@ test('opencli.openSession: 非法 id 不启动终端', () => {
   assert.ok(r.error, '应返回错误信息');
 });
 
+test('文档：所有当前文档相对链接都存在', () => {
+  const files = [
+    ...fs.readdirSync(path.join(__dirname, '..'))
+      .filter(name => name.endsWith('.md')),
+    ...fs.readdirSync(path.join(__dirname, '..', 'docs'))
+      .filter(name => name.endsWith('.md'))
+      .map(name => path.join('docs', name))
+  ];
+  for (const relativeFile of files) {
+    const filePath = path.join(__dirname, '..', relativeFile);
+    const markdown = fs.readFileSync(filePath, 'utf-8');
+    for (const match of markdown.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+      const target = match[1].split('#')[0];
+      if (!target || /^(https?:|mailto:)/i.test(target)) continue;
+      const resolved = path.resolve(path.dirname(filePath), decodeURIComponent(target));
+      assert.ok(fs.existsSync(resolved), `${relativeFile} 中的链接不存在: ${match[1]}`);
+    }
+  }
+});
+
+test('文档：API 参考覆盖 server/routes.js 的全部路由', () => {
+  const routesSource = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes.js'), 'utf-8');
+  const apiDoc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'API.md'), 'utf-8');
+  for (const match of routesSource.matchAll(/router\.(get|post)\('([^']+)'/g)) {
+    const signature = `${match[1].toUpperCase()} ${match[2]}`;
+    assert.ok(apiDoc.includes(signature), `API.md 缺少路由: ${signature}`);
+  }
+});
+
 // ========== Phase 3 回归测试：编辑路由 ==========
 
-test('edit 路由：POST /edit 缺少 lines 返回 400', async () => {
+test('HTTP 安全边界与 edit 参数校验', async () => {
   const http = require('http');
   const port = 17993;
-  const { startServer } = require('../server/server');
-  const s = startServer(port);
-  await new Promise(r => setTimeout(r, 300)); // 等启动
+  const s = serverModule.startServer(port, { enableAutoBackup: false });
+  await new Promise((resolve, reject) => {
+    if (s.server.listening) return resolve();
+    s.server.once('listening', resolve);
+    s.server.once('error', reject);
+  });
   try {
+    const requestJson = (urlPath, options = {}) => new Promise((ok, fail) => {
+      const req = http.request(`http://127.0.0.1:${port}${urlPath}`, options, res => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => ok({ status: res.statusCode, body: JSON.parse(data) }));
+      });
+      req.on('error', fail);
+      if (options.body) req.write(JSON.stringify(options.body));
+      req.end();
+    });
+
     const res = await new Promise((ok, fail) => {
-      const req = http.request(`http://localhost:${port}/api/session/claude/bad-id/edit`, {
+      const req = http.request(`http://127.0.0.1:${port}/api/session/claude/bad-id/edit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       }, res => {
@@ -414,6 +519,59 @@ test('edit 路由：POST /edit 缺少 lines 返回 400', async () => {
       req.on('error', fail);
     });
     assert.ok(res.status === 400 || res.body.error, '缺少 lines 应返回错误');
+
+    const forbidden = await new Promise((ok, fail) => {
+      const req = http.request(`http://127.0.0.1:${port}/api/cli`, {
+        headers: { Host: `evil.example:${port}` }
+      }, res => {
+        res.resume();
+        res.on('end', () => ok(res.statusCode));
+      });
+      req.on('error', fail);
+      req.end();
+    });
+    assert.strictEqual(forbidden, 403, '非 loopback Host 应被拒绝');
+
+    const originalGetSessions = claude.getSessions;
+    const originalLoadMeta = store.loadMeta;
+    claude.getSessions = () => [{
+      id: 'hidden-session-id', file: 'hidden.jsonl', filePath: 'hidden.jsonl',
+      title: 'hidden', subtitle: 'hidden-session-id', messageCount: 1,
+      lastActivity: 1, cli: 'claude', projectName: 'test'
+    }];
+    store.loadMeta = () => ({ 'hidden-session-id': { hidden: true } });
+    try {
+      const hiddenFalse = await requestJson('/api/cli/claude/project/test/sessions?showHidden=false');
+      const hiddenTrue = await requestJson('/api/cli/claude/project/test/sessions?showHidden=true');
+      assert.deepStrictEqual(hiddenFalse.body, [], 'showHidden=false 不应返回隐藏会话');
+      assert.strictEqual(hiddenTrue.body.length, 1, 'showHidden=true 应返回隐藏会话');
+    } finally {
+      claude.getSessions = originalGetSessions;
+      store.loadMeta = originalLoadMeta;
+    }
+
+    const backupStatus = await requestJson('/api/backup/status');
+    assert.ok('branch' in backupStatus.body, '备份状态应返回 branch');
+    assert.ok('webdavUsername' in backupStatus.body, '备份状态应返回 webdavUsername');
+    assert.ok(!('webdavPassword' in backupStatus.body), '备份状态不得返回密码');
+
+    const originalGitSetRemote = backup.gitSetRemote;
+    const originalUpdateConfig = store.updateConfig;
+    let configWritten = false;
+    backup.gitSetRemote = () => ({ ok: false, error: 'mock remote failure' });
+    store.updateConfig = () => { configWritten = true; return {}; };
+    try {
+      const configFailure = await requestJson('/api/backup/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { repoUrl: 'https://example.invalid/repo.git' }
+      });
+      assert.strictEqual(configFailure.status, 400);
+      assert.strictEqual(configWritten, false, '远程设置失败时不应写入配置');
+    } finally {
+      backup.gitSetRemote = originalGitSetRemote;
+      store.updateConfig = originalUpdateConfig;
+    }
   } finally {
     s.server.close(); if (s.backupTimer) clearInterval(s.backupTimer);
   }
@@ -424,8 +582,14 @@ async function main() {
   console.log('cc-manager 单元测试\n');
   console.log('='.repeat(50));
 
-  // 等待所有异步测试（如果有）
-  await new Promise(resolve => setTimeout(resolve, 100));
+  for (const { name, fn } of tests) {
+    try {
+      await fn();
+      results.push({ name, ok: true });
+    } catch (e) {
+      results.push({ name, ok: false, error: e && e.message ? e.message : String(e) });
+    }
+  }
 
   let passed = 0, failed = 0;
   for (const r of results) {

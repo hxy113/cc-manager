@@ -6,6 +6,29 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const HISTORY_FILE = path.join(CLAUDE_DIR, 'history.jsonl');
 
+function resolveProjectDir(projectName, projectsDir = PROJECTS_DIR) {
+  if (typeof projectName !== 'string' || !projectName || path.basename(projectName) !== projectName) {
+    return null;
+  }
+  const root = path.resolve(projectsDir);
+  const candidate = path.resolve(root, projectName);
+  if (path.dirname(candidate) !== root) return null;
+  try {
+    const rootStat = fs.lstatSync(root);
+    const candidateStat = fs.lstatSync(candidate);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() ||
+        !candidateStat.isDirectory() || candidateStat.isSymbolicLink()) return null;
+    const realRoot = fs.realpathSync(root);
+    const realCandidate = fs.realpathSync(candidate);
+    return path.dirname(realCandidate) === realRoot ? realCandidate : null;
+  } catch (e) {
+    // 受限 Windows 运行环境可能允许直接读取目录，却禁止 realpath 遍历用户目录父级。
+    // 上面的 basename + dirname + lstat 已确保它是根目录下的真实一级目录。
+    if (e && e.code === 'EPERM') return candidate;
+    return null;
+  }
+}
+
 // --- 路径编码反解 ---
 // Claude Code 把项目路径编码为目录名：
 //   D:\claudecode → D--claudecode
@@ -123,8 +146,8 @@ function getProjects() {
 // --- 取某个项目的会话列表 ---
 function getSessions(projectName) {
   const sessions = [];
-  const projectDir = path.join(PROJECTS_DIR, projectName);
-  if (!fs.existsSync(projectDir)) return sessions;
+  const projectDir = resolveProjectDir(projectName);
+  if (!projectDir) return sessions;
 
   const displayCache = buildDisplayCache();
   const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl') && !f.endsWith('.backup.jsonl'));
@@ -148,7 +171,10 @@ function getSessions(projectName) {
           const msg = JSON.parse(line);
           // 记录 sessionId
           if (msg.sessionId && msg.sessionId.length > 30 && !sessionId.startsWith('_')) sessionId = msg.sessionId;
-          if (msg.timestamp && msg.timestamp > lastTimestamp) lastTimestamp = msg.timestamp;
+          if (msg.timestamp) {
+            const parsedTimestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.parse(msg.timestamp);
+            if (Number.isFinite(parsedTimestamp) && parsedTimestamp > lastTimestamp) lastTimestamp = parsedTimestamp;
+          }
 
           // 取第一条"真正"的用户消息做标题
           if (!firstUserMsg && isMeaningfulUserMessage(msg)) {
@@ -185,22 +211,24 @@ function getSessions(projectName) {
 
 // --- 取某会话完整内容（行数组）---
 function getSessionContent(sessionId, projectName) {
+  let found = null;
   if (!projectName) {
     // 未指定 projectName 时遍历查找
     const projects = getProjects();
     for (const p of projects) {
       const sessions = getSessions(p.name);
-      const found = sessions.find(s => s.id === sessionId);
+      found = sessions.find(s => s.id === sessionId);
       if (found) {
         projectName = p.name;
         break;
       }
     }
+  } else {
+    found = getSessions(projectName).find(s => s.id === sessionId);
   }
-  if (!projectName) return null;
+  if (!projectName || !found) return null;
 
-  const filePath = path.join(PROJECTS_DIR, projectName, sessionId + '.jsonl');
-  if (!fs.existsSync(filePath)) return null;
+  const filePath = found.filePath;
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const result = [];
@@ -268,6 +296,10 @@ function getRawLines(sessionId, projectName) {
 // 用新 sessionId 写到同目录新文件 <newId>.jsonl，永不覆盖源文件
 // rawLines: getRawLines 返回的原始行对象数组
 function writeFork(rawLines, srcFilePath, newId) {
+  if (!Array.isArray(rawLines)) throw new TypeError('rawLines 必须是数组');
+  if (typeof newId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(newId)) {
+    throw new Error('新会话 ID 不合法');
+  }
   const dir = path.dirname(srcFilePath);
   const newFilePath = path.join(dir, `${newId}.jsonl`);
   const out = [];
@@ -277,7 +309,7 @@ function writeFork(rawLines, srcFilePath, newId) {
     if (updated.sessionId) updated.sessionId = newId;
     out.push(JSON.stringify(updated));
   }
-  fs.writeFileSync(newFilePath, out.join('\n') + '\n', 'utf-8');
+  fs.writeFileSync(newFilePath, out.join('\n') + '\n', { encoding: 'utf-8', flag: 'wx' });
   return { newFilePath, newId };
 }
 
@@ -291,6 +323,7 @@ module.exports = {
   writeFork,
   buildDisplayCache,
   invalidateCache,
+  resolveProjectDir,
   decodeProjectDir,
   encodeProjectPath
 };

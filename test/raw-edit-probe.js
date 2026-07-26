@@ -1,4 +1,10 @@
 // 隔离测试 /raw 和 /edit 的耗时与正确性
+// 会基于真实会话创建测试副本，必须显式授权。
+if (process.env.CC_MANAGER_E2E_ALLOW_REAL_DATA !== '1') {
+  console.error('已拒绝运行：请先设置 CC_MANAGER_E2E_ALLOW_REAL_DATA=1');
+  process.exit(2);
+}
+
 const fs = require('fs');
 const { startServer } = require('../server/server');
 const PORT = 17999;
@@ -13,7 +19,7 @@ setTimeout(async () => {
     console.log('测试 /raw for', sid.slice(0, 12));
 
     const t0 = Date.now();
-    const raw = await fetch(`http://localhost:${PORT}/api/cli/claude/session/${sid}/raw?projectName=${encodeURIComponent(p.name)}`).then(r => r.json());
+    const raw = await fetch(`http://localhost:${PORT}/api/session/claude/${encodeURIComponent(sid)}/raw?projectName=${encodeURIComponent(p.name)}`).then(r => r.json());
     console.log('/raw 返回', raw.lines && raw.lines.length, '行, 耗时', Date.now() - t0, 'ms');
 
     console.log('测试 /edit...');

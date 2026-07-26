@@ -355,8 +355,9 @@ $('#btn-settings').onclick = () => {
   api('/api/backup/status').then(s => {
     $('#setting-target').value = s.backupTarget || 'local';
     $('#setting-repo').value = s.repoUrl || '';
-    $('#setting-branch').value = 'main';
+    $('#setting-branch').value = s.branch || 'main';
     $('#setting-webdav-url').value = s.webdavUrl || '';
+    $('#setting-webdav-user').value = s.webdavUsername || '';
     $('#setting-local-dir').value = s.localBackupDir || '';
     $('#setting-interval').value = s.autoIntervalMin || 60;
     $('#settings-message').style.display = 'none';
@@ -440,9 +441,13 @@ async function loadRestoreHistory(page) {
         ${typeTag}
         <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d}</span>
         <code style="font-size:11px;color:var(--text-muted);flex-shrink:0">${(h.hash||'').slice(0,10)}</code>
-        <button class="btn btn-sm btn-primary" onclick="restoreFromItem('${escAttr(id)}','${h.type}')">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
+        <button class="btn btn-sm btn-primary restore-item-btn" data-restore-id="${escAttr(id)}" data-restore-type="${escAttr(h.type)}">${mode() === 'incremental' ? '增量恢复' : mode() === 'merge' ? '合并恢复' : '完全覆盖'}</button>
       </div>`;
     }).join('') + renderPagination();
+
+    list.querySelectorAll('.restore-item-btn').forEach(btn => {
+      btn.onclick = () => restoreFromItem(btn.dataset.restoreId, btn.dataset.restoreType);
+    });
 
     // 模式切换时保留分页状态
     $('#restore-mode').onchange = () => loadRestoreHistory(_restorePage);
@@ -482,8 +487,8 @@ function renderPagination() {
   return html + '</div>';
 }
 
-function escAttr(str) { return str.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
-function escHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+function escAttr(str) { return escapeHtml(String(str)).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function escHtml(str) { return escapeHtml(str); }
 
 $('#btn-restore').onclick = () => {
   $('#restore-modal').style.display = 'flex';
@@ -574,8 +579,8 @@ function renderProjects() {
   const container = $('#project-list');
   container.innerHTML = state.projects.map(p => {
     const activeClass = p.name === state.projectName ? ' active' : '';
-    return `<div class="project-item${activeClass}" data-name="${p.name}">
-      <div class="path">📁 ${p.displayPath}</div>
+    return `<div class="project-item${activeClass}" data-name="${escAttr(p.name)}">
+      <div class="path">📁 ${escapeHtml(p.displayPath)}</div>
       <div class="count">${p.sessionCount} 个会话</div>
     </div>`;
   }).join('');
@@ -721,37 +726,51 @@ function renderSessions() {
     const aliasTag = s.alias ? `<span class="alias-tag">${escapeHtml(s.alias)}</span>` : '';
     const contentMatchTag = s._contentMatch ? `<span class="alias-tag" style="background:#fef3c7;color:#92400e">🔍 内容匹配</span>` : '';
     const date = s.lastActivity ? new Date(s.lastActivity).toLocaleString() : '';
-    return `<div class="session-item${active}" data-id="${s.id}">
+    return `<div class="session-item${active}" data-id="${escAttr(s.id)}">
       <div class="title-row">
         <span class="title">${escapeHtml(s.title)}</span>
         ${fav}
         ${aliasTag}
         ${contentMatchTag}
       </div>
-      <div class="subtitle">${s.subtitle}</div>
+      <div class="subtitle">${escapeHtml(s.subtitle)}</div>
       <div class="meta-line">
         <span>${s.messageCount} 条</span>
         <span>${date}</span>
       </div>
       <div class="actions">
-        <button class="btn-icon" onclick="event.stopPropagation();openInCli('${s.id}')" title="在 CLI 中打开">📂</button>
-        <button class="btn-icon" onclick="event.stopPropagation();enterEditMode('${s.id}')" title="编辑（另存为新会话）">📝</button>
-        <button class="btn-icon" onclick="event.stopPropagation();toggleFavorite('${s.id}')" title="收藏">${s.favorite ? '★' : '☆'}</button>
-        <button class="btn-icon" onclick="event.stopPropagation();setAlias('${s.id}')" title="别名">✏️</button>
-        <button class="btn-icon" onclick="event.stopPropagation();forkSession('${s.id}')" title="Fork">🔀</button>
-        <button class="btn-icon" onclick="event.stopPropagation();deleteSession('${s.id}')" title="删除">🗑</button>
+        <button class="btn-icon" data-action="open" title="在 CLI 中打开">📂</button>
+        <button class="btn-icon" data-action="edit" title="编辑（另存为新会话）">📝</button>
+        <button class="btn-icon" data-action="favorite" title="收藏">${s.favorite ? '★' : '☆'}</button>
+        <button class="btn-icon" data-action="alias" title="别名">✏️</button>
+        <button class="btn-icon" data-action="fork" title="Fork">🔀</button>
+        <button class="btn-icon" data-action="delete" title="删除">🗑</button>
       </div>
     </div>`;
   }).join('');
 
+  const actions = {
+    open: openInCli,
+    edit: enterEditMode,
+    favorite: toggleFavorite,
+    alias: setAlias,
+    fork: forkSession,
+    delete: deleteSession
+  };
   container.querySelectorAll('.session-item').forEach(el => {
     el.onclick = () => selectSession(el.dataset.id);
+    el.querySelectorAll('[data-action]').forEach(btn => {
+      btn.onclick = event => {
+        event.stopPropagation();
+        actions[btn.dataset.action](el.dataset.id);
+      };
+    });
   });
 }
 
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = String(str ?? '');
   return div.innerHTML;
 }
 
@@ -785,7 +804,7 @@ async function selectSession(sessionId) {
 
   // 加载内容
   try {
-    const url = `/api/cli/${state.cli}/session/${sessionId}?projectName=${encodeURIComponent(state.projectName)}`;
+    const url = `/api/cli/${state.cli}/session/${encodeURIComponent(sessionId)}?projectName=${encodeURIComponent(state.projectName)}`;
     state.content = await api(url);
     renderPreview();
     $('#btn-open').style.display = '';
@@ -793,7 +812,7 @@ async function selectSession(sessionId) {
     $('#btn-export').style.display = '';
     $('#btn-delete').style.display = '';
   } catch (e) {
-    $('#preview-content').innerHTML = `<div class="empty-state"><span>✗ 加载失败: ${e.message}</span></div>`;
+    $('#preview-content').innerHTML = `<div class="empty-state"><span>✗ 加载失败: ${escapeHtml(e.message)}</span></div>`;
   }
 }
 
@@ -985,7 +1004,7 @@ function clearPreview() {
 $('#btn-export').onclick = async () => {
   if (!state.currentSession) return;
   try {
-    const url = `/api/cli/${state.cli}/session/${state.currentSession.id}/export?projectName=${encodeURIComponent(state.projectName)}`;
+    const url = `/api/cli/${state.cli}/session/${encodeURIComponent(state.currentSession.id)}/export?projectName=${encodeURIComponent(state.projectName)}`;
     const blob = await fetch(url).then(r => {
       if (!r.ok) throw new Error('导出失败');
       return r.blob();
@@ -1007,7 +1026,7 @@ async function toggleFavorite(sessionId) {
   if (!session) return;
   const newVal = !session.favorite;
   try {
-    await api(`/api/meta/${sessionId}`, {
+    await api(`/api/meta/${encodeURIComponent(sessionId)}`, {
       method: 'POST',
       body: JSON.stringify({ favorite: newVal, cli: state.cli, projectName: state.projectName })
     });
@@ -1021,18 +1040,19 @@ let aliasSessionId = null;
 $('#alias-cancel').onclick = () => { $('#alias-modal').style.display = 'none'; aliasSessionId = null; };
 $('#alias-save').onclick = async () => {
   if (!aliasSessionId) return;
+  const savedSessionId = aliasSessionId;
   const val = $('#alias-input').value.trim();
   try {
-    await api(`/api/meta/${aliasSessionId}`, {
+    await api(`/api/meta/${encodeURIComponent(savedSessionId)}`, {
       method: 'POST',
       body: JSON.stringify({ alias: val || null, cli: state.cli, projectName: state.projectName })
     });
-    const session = state.sessions.find(s => s.id === aliasSessionId);
+    const session = state.sessions.find(s => s.id === savedSessionId);
     if (session) session.alias = val || null;
     $('#alias-modal').style.display = 'none';
     aliasSessionId = null;
     applyFilters();
-    if (state.currentSession && state.currentSession.id === aliasSessionId) {
+    if (state.currentSession && state.currentSession.id === savedSessionId) {
       renderPreview();
     }
     showToast(val ? '别名已设置' : '别名已清除', 'success');
@@ -1052,7 +1072,7 @@ async function openInCli(sessionId) {
   const id = sessionId || (state.currentSession && state.currentSession.id);
   if (!id) return;
   try {
-    const r = await api(`/api/session/${state.cli}/${id}/open`, {
+    const r = await api(`/api/session/${state.cli}/${encodeURIComponent(id)}/open`, {
       method: 'POST',
       body: JSON.stringify({ projectName: state.projectName })
     });
@@ -1069,7 +1089,7 @@ $('#btn-open').onclick = () => { if (state.currentSession) openInCli(state.curre
 async function forkSession(sessionId) {
   if (!confirm('Fork 将创建此会话的副本，基于当前内容新建一个会话？')) return;
   try {
-    const r = await api(`/api/session/${state.cli}/${sessionId}/fork`, {
+    const r = await api(`/api/session/${state.cli}/${encodeURIComponent(sessionId)}/fork`, {
       method: 'POST',
       body: JSON.stringify({ projectName: state.projectName })
     });
@@ -1086,7 +1106,7 @@ async function forkSession(sessionId) {
 async function deleteSession(sessionId) {
   if (!confirm(`确定将会话移到 trash（回收站）？可以手动恢复。`)) return;
   try {
-    const r = await api(`/api/session/${state.cli}/${sessionId}/delete`, {
+    const r = await api(`/api/session/${state.cli}/${encodeURIComponent(sessionId)}/delete`, {
       method: 'POST',
       body: JSON.stringify({ projectName: state.projectName })
     });
@@ -1188,7 +1208,7 @@ async function enterEditMode(sessionId) {
   state.currentSession = sess;
   $$('.session-item').forEach(el=>el.classList.toggle('active', el.dataset.id===sessionId));
   try {
-    const url = `/api/session/${state.cli}/${sessionId}/raw?projectName=${encodeURIComponent(state.projectName)}`;
+    const url = `/api/session/${state.cli}/${encodeURIComponent(sessionId)}/raw?projectName=${encodeURIComponent(state.projectName)}`;
     const data = await api(url);
     editor.origLines = data.lines || [];
     editor.entries = []; editor.selected.clear(); editor.clipboard = []; editor.eidSeq = 1;
@@ -1261,7 +1281,7 @@ async function saveEdit() {
   }
   while(ptr<editedMsgLines.length){out.push(editedMsgLines[ptr]);ptr++;}
   try {
-    const r=await api(`/api/session/${state.cli}/${state.currentSession.id}/edit`,{method:'POST',body:JSON.stringify({projectName:state.projectName,lines:out})});
+    const r=await api(`/api/session/${state.cli}/${encodeURIComponent(state.currentSession.id)}/edit`,{method:'POST',body:JSON.stringify({projectName:state.projectName,lines:out})});
     if(r.ok) {
       showToast((r.message||'已保存')+'，新会话: '+r.newSessionId.slice(0,8),'success');
       editor.active=false; await loadSessions();

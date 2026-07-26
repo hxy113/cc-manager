@@ -1,43 +1,50 @@
 const express = require('express');
-const cors = require('cors');
 const path = require('path');
 const routes = require('./routes');
 const store = require('./store');
 const backup = require('./backup');
 
-// 全局异常保护——不因任何意外错误崩溃进程
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err.message?.slice(0, 200));
-});
-process.on('unhandledRejection', (err) => {
-  console.error('[unhandledRejection]', err?.message?.slice(0, 200));
-});
-
 const DEFAULT_PORT = 17890;
+const LOOPBACK_HOST = '127.0.0.1';
 
-function startServer(port) {
+function isAllowedHost(hostHeader) {
+  if (typeof hostHeader !== 'string') return false;
+  const host = hostHeader.trim().toLowerCase();
+  return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host) || /^\[::1\](:\d+)?$/.test(host);
+}
+
+function startServer(port, options = {}) {
   port = port || DEFAULT_PORT;
 
   const app = express();
-  app.use(cors());
+  app.disable('x-powered-by');
+  // 这是能删除、编辑和恢复本地会话的管理服务。拒绝非 loopback Host，
+  // 避免局域网暴露和 DNS rebinding 借浏览器调用本地 API。
+  app.use((req, res, next) => {
+    if (!isAllowedHost(req.headers.host)) {
+      return res.status(403).json({ error: '仅允许从本机访问' });
+    }
+    next();
+  });
   app.use(express.json({ limit: '10mb' }));
   app.use(express.static(path.join(__dirname, '..', 'web')));
 
   // REST API
   app.use(routes);
 
-  // Express 全局错误处理
-  app.use((err, req, res, next) => {
-    console.error('[express error]', err?.message?.slice(0, 200));
-    res.status(500).json({ error: err?.message || '内部错误' });
-  });
-
   // 兜底：返回前端 index.html（SPA）
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'web', 'index.html'));
   });
 
-  const server = app.listen(port, () => {
+  // Express 全局错误处理必须放在所有路由之后。
+  app.use((err, req, res, next) => {
+    console.error('[express error]', err?.message?.slice(0, 200));
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: err?.message || '内部错误' });
+  });
+
+  const server = app.listen(port, LOOPBACK_HOST, () => {
     console.log(`cc-manager UI 已启动: http://localhost:${port}`);
     console.log(`按 Ctrl+C 停止服务`);
   });
@@ -45,7 +52,7 @@ function startServer(port) {
   // 自动备份定时器
   const config = store.getConfig();
   let backupTimer = null;
-  if (config.autoIntervalMin > 0) {
+  if (options.enableAutoBackup !== false && config.autoIntervalMin > 0) {
     const intervalMs = config.autoIntervalMin * 60 * 1000;
     backupTimer = setInterval(async () => {
       const ts = new Date().toLocaleString();
@@ -70,4 +77,4 @@ function startServer(port) {
   return { app, server, backupTimer };
 }
 
-module.exports = { startServer, DEFAULT_PORT };
+module.exports = { startServer, DEFAULT_PORT, LOOPBACK_HOST, isAllowedHost };

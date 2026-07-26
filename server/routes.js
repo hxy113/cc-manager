@@ -1,4 +1,6 @@
 const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const claude = require('./adapters/claude');
 const codex = require('./adapters/codex');
@@ -46,8 +48,8 @@ router.get('/api/cli/:cli/project/:projectName/sessions', (req, res) => {
         forkedFrom: m.forkedFrom || null
       };
     });
-    // 隐藏的会话默认不返回，除非传 showHidden=true
-    if (!req.query.showHidden) {
+    // 隐藏的会话默认不返回，仅显式 showHidden=true 时包含。
+    if (req.query.showHidden !== 'true') {
       sessionList = sessionList.filter(s => !s.hidden);
     }
     res.json(sessionList);
@@ -122,14 +124,14 @@ router.post('/api/session/:cli/:sessionId/fork', (req, res) => {
   }
 
   try {
-    const projectName = req.body.projectName;
+    const projectName = req.body && req.body.projectName;
+    if (!projectName) return res.status(400).json({ error: '缺少 projectName' });
 
     // 找源文件路径
     const sessions = adapter.getSessions(projectName);
     const srcSession = sessions.find(s => s.id === req.params.sessionId);
     if (!srcSession) return res.status(404).json({ error: '源会话记录未找到' });
 
-    const crypto = require('crypto');
     const newId = crypto.randomUUID();
 
     // 读原始行（保持原格式，codex 不会被 normalize 成无效格式）
@@ -158,7 +160,8 @@ router.post('/api/session/:cli/:sessionId/delete', (req, res) => {
   if (!adapter) return res.status(404).json({ error: '未知 CLI' });
 
   try {
-    const projectName = req.body.projectName;
+    const projectName = req.body && req.body.projectName;
+    if (!projectName) return res.status(400).json({ error: '缺少 projectName' });
     const sessions = adapter.getSessions(projectName);
     const session = sessions.find(s => s.id === req.params.sessionId);
     if (!session) return res.status(404).json({ error: '会话未找到' });
@@ -168,11 +171,12 @@ router.post('/api/session/:cli/:sessionId/delete', (req, res) => {
     store.ensureDir(trashDir);
 
     const ts = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
-    const trashName = `${ts}_${path.basename(session.file)}`;
+    // UUID 后缀避免不同项目中同名会话在同一秒删除时互相覆盖。
+    const trashName = `${ts}_${req.params.cli}_${crypto.randomUUID().slice(0, 8)}_${path.basename(session.file)}`;
     const trashPath = path.join(trashDir, trashName);
 
-    require('fs').copyFileSync(session.filePath, trashPath);
-    require('fs').unlinkSync(session.filePath);
+    fs.copyFileSync(session.filePath, trashPath, fs.constants.COPYFILE_EXCL);
+    fs.unlinkSync(session.filePath);
     store.updateMeta(req.params.sessionId, { hidden: true });
 
     res.json({ ok: true, trashPath, message: '已移动到 trash' });
@@ -227,7 +231,7 @@ router.post('/api/session/:cli/:sessionId/open', (req, res) => {
   }
 
   const result = opencli.openSession(req.params.cli, req.params.sessionId, projectName);
-  res.json(result);
+  res.status(result.ok ? 200 : 400).json(result);
 });
 
 // ========== 编辑会话（copy-on-write：写新会话，永不覆盖源文件）==========
@@ -290,8 +294,10 @@ router.get('/api/backup/status', (req, res) => {
     gitAvailable: backup.gitAvailable(),
     repoConfigured: !!config.repoUrl,
     repoUrl: config.repoUrl || null,
+    branch: config.branch || 'main',
     backupTarget: config.backupTarget || 'local',
     webdavUrl: config.webdavUrl || null,
+    webdavUsername: config.webdavUsername || '',
     webdavConfigured: !!config.webdavUrl,
     localBackupDir: config.localBackupDir || null,
     lastBackupAt: config.lastBackupAt,
@@ -308,10 +314,11 @@ router.post('/api/backup/config', (req, res) => {
   for (const key of allowed) {
     if (req.body && req.body[key] !== undefined) updates[key] = req.body[key];
   }
-  const config = store.updateConfig(updates);
-  if (updates.repoUrl) {
-    backup.gitSetRemote(updates.repoUrl);
+  if (updates.repoUrl !== undefined) {
+    const remoteResult = backup.gitSetRemote(updates.repoUrl);
+    if (!remoteResult.ok) return res.status(400).json({ error: '设置 Git 远程失败: ' + remoteResult.error });
   }
+  const config = store.updateConfig(updates);
   res.json(config);
 });
 
@@ -337,8 +344,8 @@ router.post('/api/backup/webdav-test', async (req, res) => {
 
 // 备份历史（分页）
 router.get('/api/backup/history', (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  const pageSize = parseInt(req.query.pageSize) || 20;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize) || 20));
   res.json(backup.listBackupHistory({ page, pageSize }));
 });
 
@@ -346,6 +353,14 @@ router.get('/api/backup/history', (req, res) => {
 router.post('/api/backup/restore', async (req, res) => {
   const { hash, cli, mode, localPath } = req.body || {};
   if (!hash && !localPath) return res.status(400).json({ error: '需要 hash 或 localPath 参数' });
+  if (hash !== undefined && (typeof hash !== 'string' || !/^[0-9a-f]{7,64}$/i.test(hash))) {
+    return res.status(400).json({ error: 'hash 参数无效' });
+  }
+  if (localPath !== undefined && typeof localPath !== 'string') {
+    return res.status(400).json({ error: 'localPath 参数无效' });
+  }
+  if (cli && !['claude', 'codex'].includes(cli)) return res.status(400).json({ error: 'cli 参数无效' });
+  if (mode && !['incremental', 'merge', 'full'].includes(mode)) return res.status(400).json({ error: 'mode 参数无效' });
   try {
     let result;
     if (localPath) {

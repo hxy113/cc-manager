@@ -11,14 +11,17 @@ cc-manager — Claude Code / Codex CLI 的本地会话管理与备份工具
 
 用法:
   cc-manager ui [port]    启动 Web UI（默认端口 17890）
-  cc-manager backup       执行一次增量备份
-  cc-manager backup --init 初始化备份仓库并配置远程
-  cc-manager restore      打开恢复界面（在 UI 中操作）
+  cc-manager backup       按当前配置执行一次手动备份
+  cc-manager backup --init 初始化内部备份 Git 仓库
+  cc-manager backup --set-remote <URL>  设置 Git 远程地址
+  cc-manager backup --first-push        备份并尝试首次推送
+  cc-manager restore      列出最近备份并提示使用 UI 恢复
   cc-manager help         显示此帮助
 
 环境变量:
   CC_MANAGER_GH_TOKEN     GitHub 经典令牌（用于推送备份到私有仓库）
                           不可代码硬编码，仅在 env 中。
+  CC_MANAGER_WEBDAV_PASS  WebDAV Basic Auth 密码（不写入配置文件）
 `);
 }
 
@@ -116,7 +119,7 @@ async function cmdBackup() {
 // ========== Restore ==========
 async function cmdRestore() {
   const backup = require('./backup');
-  const history = backup.listBackupHistory(20);
+  const { entries: history } = backup.listBackupHistory({ page: 1, pageSize: 20 });
   if (!history.length) {
     console.log('没有备份历史。');
     return;
