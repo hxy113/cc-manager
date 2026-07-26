@@ -467,6 +467,17 @@ function sameFileState(a, b) {
   return !!a && !!b && a.size === b.size && a.sha256 === b.sha256;
 }
 
+function sourceIdentity(stat) {
+  return `${stat.dev || 0}:${stat.ino || 0}`;
+}
+
+function canReuseHashedFile(previous, stat) {
+  return !!previous && previous.size === stat.size &&
+    previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs &&
+    previous.sourceIdentity === sourceIdentity(stat) &&
+    Array.isArray(previous.chunks) && /^[0-9a-f]{64}$/i.test(previous.sha256 || '');
+}
+
 function defaultSyncSources() {
   return [
     { prefix: 'claude-sessions', path: path.join(os.homedir(), '.claude', 'projects') },
@@ -495,12 +506,22 @@ function createSyncSnapshot({ baseDir, timestamp, previousName, sourceRoots = de
   let newChunks = 0;
   let changedFiles = 0;
   let reusedFiles = 0;
+  let hashedFiles = 0;
 
   for (const file of collectSyncSourceFiles(sourceRoots)) {
+    const previousEntry = previousFiles[file.relative];
+    if (canReuseHashedFile(previousEntry, file.stat)) {
+      currentFiles[file.relative] = previousEntry;
+      reusedFiles++;
+      continue;
+    }
     const stored = storeFileAsChunks(file.source, objectRoot, file.stat.size);
+    hashedFiles++;
     const entry = {
       size: stored.size,
-      mtimeMs: Math.trunc(file.stat.mtimeMs),
+      mtimeMs: file.stat.mtimeMs,
+      ctimeMs: file.stat.ctimeMs,
+      sourceIdentity: sourceIdentity(file.stat),
       sha256: stored.sha256,
       chunks: stored.chunks
     };
@@ -525,7 +546,7 @@ function createSyncSnapshot({ baseDir, timestamp, previousName, sourceRoots = de
     return {
       ok: true, skipped: true, message: '无内容变更，跳过',
       dir: previous.dir, snapshotName: path.basename(previous.dir), bytesStored, newChunks,
-      changedFiles: 0, reusedFiles, deletedFiles: 0
+      changedFiles: 0, reusedFiles, hashedFiles, deletedFiles: 0
     };
   }
 
@@ -545,7 +566,7 @@ function createSyncSnapshot({ baseDir, timestamp, previousName, sourceRoots = de
     deleted,
     stats: {
       files: Object.keys(currentFiles).length,
-      changedFiles,
+      changedFiles, hashedFiles,
       reusedFiles,
       deletedFiles: deleted.length,
       newChunks,
@@ -558,7 +579,7 @@ function createSyncSnapshot({ baseDir, timestamp, previousName, sourceRoots = de
     ok: true,
     message: `同步快照：${changedFiles} 个变化，${deleted.length} 个移入回收站，新增 ${newChunks} 个数据块（${bytesStored} 字节）`,
     dir: finalDir, snapshotName, bytesStored, newChunks, changedFiles,
-    reusedFiles, deletedFiles: deleted.length
+    reusedFiles, hashedFiles, deletedFiles: deleted.length
   };
 }
 

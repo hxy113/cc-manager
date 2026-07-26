@@ -332,6 +332,7 @@ test('同步快照: 内容寻址分块去重，追加大文件只新增尾部块
       baseDir: f.baseDir, timestamp: '2026-07-26-10-00-00-001', sourceRoots: f.sourceRoots
     });
     assert.ok(first.ok && !first.skipped);
+    assert.strictEqual(first.hashedFiles, 3, '首份快照应哈希三个源文件');
     assert.strictEqual(first.newChunks, 3, '相同的 4 MiB 块应只保存一次，另含 tail 与 meta 块');
 
     fs.appendFileSync(active, '-appended');
@@ -340,6 +341,7 @@ test('同步快照: 内容寻址分块去重，追加大文件只新增尾部块
       previousName: first.snapshotName, sourceRoots: f.sourceRoots
     });
     assert.strictEqual(second.changedFiles, 1);
+    assert.strictEqual(second.hashedFiles, 1, '只有活跃文件变化时，历史会话和元数据不应重复读取哈希');
     assert.strictEqual(second.newChunks, 1, '追加后完整前缀块应复用，只写新的尾块');
     assert.ok(second.bytesStored < 1024, '追加少量文本不应再次写入整个大对话');
 
@@ -348,6 +350,7 @@ test('同步快照: 内容寻址分块去重，追加大文件只新增尾部块
       previousName: second.snapshotName, sourceRoots: f.sourceRoots
     });
     assert.ok(unchanged.skipped, '内容未变化时不发布空快照');
+    assert.strictEqual(unchanged.hashedFiles, 0, 'size/mtime/ctime/文件标识均未变时应复用已验证清单');
   } finally {
     fs.rmSync(f.tmp, { recursive: true, force: true });
   }

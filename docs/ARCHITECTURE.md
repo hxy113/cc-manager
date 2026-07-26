@@ -169,7 +169,7 @@ Express on 127.0.0.1:<port>
 
 本地自动同步：
 
-- 扫描 Claude/Codex 的 `.jsonl` 和 `meta.json`，完整读取文件内容，不只依赖 `mtime`；
+- 扫描 Claude/Codex 的 `.jsonl` 和 `meta.json`；`size + mtime + ctime + dev/ino` 全部未变时复用上一份已哈希记录，任一项变化才完整读取并按内容哈希，不只依赖 `mtime`；
 - 固定按 4 MiB 分块，每块计算 SHA-256，并仅将仓库中不存在的对象写入 `.cc-manager-sync/objects/<前两位>/<hash>`；
 - `auto-<timestamp>/.sync-manifest.json` 保存该时刻的完整路径→文件哈希→块列表映射，因此任意一份新快照都不依赖长链才能解释；
 - 相对父快照消失的路径进入 `deleted`，记录删除时间、上一快照和原文件哈希。文件从活动视图移走，但旧清单和对象仍是回收站，可追溯且不物理删除；
@@ -177,7 +177,7 @@ Express on 127.0.0.1:<port>
 - 父快照已有某类会话而本轮整个源目录缺失时失败关闭，不把挂载、权限或目录异常误发布为批量删除；
 - 只有发布成功后才更新 `lastAutoBackupDir`。`autoBackupMtime` 只为旧配置兼容保留。
 
-固定分块使 JSONL 末尾追加通常只产生一个新的尾块；相同内容即使来自不同文件也共享对象。源文件扫描开始时记录大小，本轮最多读取该长度，避免活跃日志持续追加导致备份永不结束。
+元数据缓存让绝大多数历史会话不再重复读取；固定分块使 JSONL 末尾追加通常只产生一个新的尾块，相同内容即使来自不同文件也共享对象。源文件扫描开始时记录大小，本轮最多读取该长度，避免活跃日志持续追加导致备份永不结束。
 
 Git 通过 `execFileSync('git', args)` 执行，避免 Windows shell 解释 `%`、`|` 等字符。WebDAV 使用 Node `http/https`，Basic Auth 密码只来自环境变量。
 
